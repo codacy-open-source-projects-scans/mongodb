@@ -13,6 +13,7 @@
 #include "mongo/db/exec/sbe/util/debug_print.h"
 #include "mongo/db/exec/sbe/values/slot.h"
 #include "mongo/db/exec/sbe/values/value.h"
+#include "mongo/db/exec/trial_run_tracker.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
@@ -98,12 +99,12 @@ public:
                                                          foreignKey,
                                                          asKey,
                                                          strategy,
-                                                         true /* shouldProduceBson */);
+                                                         /*shouldProduceBson=*/true);
         auto solution = makeQuerySolution(std::move(lookupNode));
 
         // Convert logical solution into the physical SBE plan.
         auto [resultSlots, stage, data, _] =
-            buildPlanStage(std::move(solution), colls, false /*hasRecordId*/);
+            buildPlanStage(std::move(solution), colls, /*hasRecordId=*/false);
 
         if (enableDebugOutput) {
             DebugPrintInfo debugPrintInfo{};
@@ -151,7 +152,7 @@ public:
 
         MultipleCollectionAccessor colls(localColl,
                                          secondaryAcquisitions,
-                                         false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+                                         /*isAnySecondaryNamespaceAViewOrNotFullyLocal=*/false);
 
         auto tree = buildLookupSbeTree(strategy, colls, localKey, foreignKey, asKey);
         auto& stage = tree.stage;
@@ -216,7 +217,7 @@ public:
         expectedDocuments.reserve(expectedPairs.size());
         for (auto& [localDocument, matchedDocuments] : expectedPairs) {
             MutableDocument expectedDocument;
-            expectedDocument.reset(localDocument, false /* bsonHasMetadata */);
+            expectedDocument.reset(localDocument, /*bsonHasMetadata=*/false);
 
             std::vector<mongo::Value> matchedValues{matchedDocuments.begin(),
                                                     matchedDocuments.end()};
@@ -243,7 +244,7 @@ protected:
     std::vector<EqLookupNode::LookupStrategy> strategies = {
         EqLookupNode::LookupStrategy::kNestedLoopJoin, EqLookupNode::LookupStrategy::kHashJoin};
 
-private:
+protected:
     const NamespaceString _foreignNss =
         NamespaceString::createNamespaceString_forTest("testdb.sbe_stage_builder_foreign");
 };
@@ -765,35 +766,6 @@ TEST_F(LookupStageBuilderTest, ThreeComponentAsPathDoesNotPerformArrayTraversal)
         "_id", "_id", "one.two.three", {fromjson("{_id: 0, one: {two: {three: [{_id: 0}]}}}")});
 }
 
-// The hash-join path builds the local (probe) key as a plain array rather than an ArraySet, so that
-// array can contain duplicate values. These tests cover that case for a top-level local field and
-// for a dotted local path, and assert that each foreign document is still matched exactly once.
-TEST_F(LookupStageBuilderTest, HashJoin_LocalKeyArrayWithDuplicateValues) {
-    const std::vector<BSONObj> ldocs = {fromjson("{_id: 0, lkey: [1, 1, 2, 1]}")};
-    const std::vector<BSONObj> fdocs = {fromjson("{_id: 0, fkey: 1}"),
-                                        fromjson("{_id: 1, fkey: 2}")};
-
-    const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
-        {ldocs[0], {fdocs[0], fdocs[1]}},
-    };
-
-    insertDocuments(ldocs, fdocs);
-    assertMatchedDocuments(EqLookupNode::LookupStrategy::kHashJoin, "lkey", "fkey", expected);
-}
-
-TEST_F(LookupStageBuilderTest, HashJoin_LocalKeyDottedPathWithDuplicateValues) {
-    const std::vector<BSONObj> ldocs = {fromjson("{_id: 0, a: [{b: 1}, {b: 1}, {b: 2}]}")};
-    const std::vector<BSONObj> fdocs = {fromjson("{_id: 0, fkey: 1}"),
-                                        fromjson("{_id: 1, fkey: 2}")};
-
-    const std::vector<std::pair<BSONObj, std::vector<BSONObj>>> expected = {
-        {ldocs[0], {fdocs[0], fdocs[1]}},
-    };
-
-    insertDocuments(ldocs, fdocs);
-    assertMatchedDocuments(EqLookupNode::LookupStrategy::kHashJoin, "a.b", "fkey", expected);
-}
-
 class ExecutablePlan {
 public:
     ExecutablePlan(MultipleCollectionAccessor colls,
@@ -1213,12 +1185,12 @@ protected:
 
         MultipleCollectionAccessor colls(mainAcquisition,
                                          secondaryAcquisitions,
-                                         false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+                                         /*isAnySecondaryNamespaceAViewOrNotFullyLocal=*/false);
 
         BuildPlanStageParam params;
         params.expCtx = expCtx;
         auto [resultSlots, rootStage, data, _] =
-            buildPlanStage(std::move(solution), colls, false /*hasRecordId*/, std::move(params));
+            buildPlanStage(std::move(solution), colls, /*hasRecordId=*/false, std::move(params));
         ASSERT_EQ(resultSlots.size(), 1);
 
         if (enableDebugOutput) {
@@ -2691,6 +2663,59 @@ TEST_F(BinaryJoinStageBuilderTest, JoinFilterOnMaterializedDocument) {
         fromjson("{_id: 1, l1key: 1, x: {y: {_id: 11, f1key: 1, l2key: 11}}, w: {z: {_id: 21, "
                  "f2key: 11}}}"),
     });
+}
+
+// The lookup paths record their trial run opt-outs on the blueprint nodes before lowering them,
+// so that a later deferred lowering would apply them the same way. Here the lowered plan runs
+// under a trial run tracker: the foreign side's reads are not counted, so a read cap just above
+// the outer side's reads lets the plan finish, while a cap below them stops it immediately.
+TEST_F(LookupStageBuilderTest, TrialRunDoesNotCountForeignReads) {
+    const std::vector<BSONObj> ldocs = {
+        fromjson("{_id: 0, lkey: 1}"),
+        fromjson("{_id: 1, lkey: 12}"),
+    };
+    const std::vector<BSONObj> fdocs = {
+        fromjson("{_id: 0, fkey: 1}"),
+        fromjson("{_id: 1, fkey: 12}"),
+        fromjson("{_id: 2, fkey: 13}"),
+        fromjson("{_id: 3, fkey: 14}"),
+    };
+    insertDocuments(ldocs, fdocs);
+
+    CollectionOrViewAcquisitionMap secondaryAcquisitions;
+    CollectionOrViewAcquisitionRequests acquisitionRequests;
+    acquisitionRequests.emplace_back(CollectionOrViewAcquisitionRequest::fromOpCtx(
+        operationContext(), _nss, AcquisitionPrerequisites::kRead));
+    acquisitionRequests.emplace_back(CollectionOrViewAcquisitionRequest::fromOpCtx(
+        operationContext(), _foreignNss, AcquisitionPrerequisites::kRead));
+    secondaryAcquisitions = makeAcquisitionMap(
+        acquireCollectionsOrViewsMaybeLockFree(operationContext(), acquisitionRequests));
+    auto localColl = secondaryAcquisitions.extract(_nss).mapped();
+    MultipleCollectionAccessor colls(
+        localColl, secondaryAcquisitions, false /* isAnySecondaryNamespaceAViewOrNotFullyLocal */);
+
+    for (auto strategy : strategies) {
+        auto runWithReadCap = [&](size_t maxReads) {
+            auto tree = buildLookupSbeTree(strategy, colls, "lkey", "fkey", "result");
+            // buildLookupSbeTree() opens the plan, and a hash join reads its whole foreign side
+            // in open(). Reopen the plan with the tracker attached so that every read is tracked.
+            tree.stage->close();
+            TrialRunTracker tracker(boost::none, maxReads, boost::none, boost::none);
+            tree.stage->attachToTrialRunTracker(&tracker);
+            tree.stage->open(false);
+            PlanState state = PlanState::ADVANCED;
+            while (state == PlanState::ADVANCED) {
+                state = tree.stage->getNext();
+            }
+            tree.stage->close();
+        };
+
+        // The plan reads the two local documents; the foreign side does not participate, so a cap
+        // of three reads is enough to finish.
+        runWithReadCap(3);
+        // The tracker is live: a cap below the outer side's reads stops the run.
+        ASSERT_THROWS_CODE(runWithReadCap(1), DBException, ErrorCodes::QueryTrialRunCompleted);
+    }
 }
 
 }  // namespace

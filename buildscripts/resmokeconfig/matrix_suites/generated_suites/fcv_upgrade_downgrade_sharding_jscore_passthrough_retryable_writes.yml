@@ -30,6 +30,7 @@ executor:
     mongod_options:
       set_parameters:
         enableTestCommands: 1
+        failpoint.disableReplicatedFastCount: "{mode: 'alwaysOn'}"
         failpoint.overrideRecordIdsReplicatedFalse: "{mode: 'alwaysOn'}"
     mongos_options:
       set_parameters:
@@ -135,4 +136,5 @@ selector:
     - jstests/fle2/**/*.js
     - jstests/core_sharding/**/*.js
     - jstests/aggregation/**/*.js
+    - jstests/core/catalog/fcv_suite_selftest.js
 test_kind: js_test

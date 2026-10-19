@@ -105,6 +105,12 @@ public:
      * select a winner.
      * If query.getExplain().has_value(), collect and return planExplainerData as part of the
      * PlanRankingResult.
+     *
+     * By default, under sampling CE, a plan with an index scan estimated to scan zero keys is
+     * non-estimable: like a plan with an unsupported node, it is returned for the multi-planner to
+     * rank along with the best costed plan. Callers without a multi-planner fallback that need a
+     * single costed plan (e.g. join optimization) pass
+     * 'considerZeroCESampledIXScanNonEstimable' = false.
      */
     static StatusWith<PlanRankingResult> planWithCostBasedRanking(
         const QueryPlannerParams& params,
@@ -112,7 +118,8 @@ public:
         const ce::ExactCardinalityEstimator* exactCardinality,
         std::vector<std::unique_ptr<QuerySolution>> allSoln,
         const CanonicalQuery& query,
-        QueryCBRCEModeEnum ceMode);
+        QueryCBRCEModeEnum ceMode,
+        bool considerZeroCESampledIXScanNonEstimable = true);
 
     /**
      * Generates and returns a query solution, given data retrieved from the plan cache.

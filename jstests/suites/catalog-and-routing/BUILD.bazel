@@ -22,7 +22,7 @@ resmoke_suite_test(
     data = ["//jstests/concurrency/reshard_collection_util:all_javascript_files"] + CONCURRENCY_DATA,
     shard_count = 8,
     tags = [
-        "ci-release-critical",
+        "ci-all-variants",
         "common",
         "concurrency",
         "incompatible_debug_mode",
@@ -53,7 +53,7 @@ resmoke_suite_test(
     ] + CORE_DATA,
     shard_count = 20,
     tags = [
-        "ci-release-critical",
+        "ci-all-variants",
         "common",
         "jscore",
         "sharding",
@@ -76,7 +76,7 @@ resmoke_suite_test(
     ] + CORE_DATA,
     shard_count = 11,
     tags = [
-        "ci-release-critical",
+        "ci-all-variants",
         "common",
         "jscore",
         "requires_large_host_aubsan",
@@ -106,7 +106,7 @@ resmoke_suite_test(
     ] + CORE_DATA,
     shard_count = 18,
     tags = [
-        "ci-release-critical",
+        "ci-all-variants",
         "common",
         "incompatible_debug_mode",
         "large",
@@ -286,7 +286,6 @@ resmoke_suite_test(
     tags = [
         "ci-default",
         "jscore",
-        "requires_replicated_fast_count_recovery",
     ],
     deps = [
         "//src/mongo/db:mongod",
@@ -347,6 +346,98 @@ resmoke_suite_test(
 )
 
 resmoke_suite_test(
+    name = "sharding_jscore_passthrough_with_user_write_blocking",
+    size = "large",
+    config = "//buildscripts/resmokeconfig:matrix_suites/generated_suites/sharding_jscore_passthrough_with_user_write_blocking.yml",
+    shard_count = 26,
+    tags = [
+        "common",
+        "incompatible_mac",
+        "jscore",
+        "sharding",
+        "user_write_blocking",
+    ],
+    target_compatible_with = select({
+        "@platforms//os:macos": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//src/mongo/db:mongod",
+        "//src/mongo/s:mongos",
+        "//src/mongo/shell:mongo",
+    ],
+)
+
+resmoke_suite_test(
+    name = "sharded_collections_jscore_passthrough_with_replica_set_write_blocking",
+    size = "large",
+    config = "//buildscripts/resmokeconfig:matrix_suites/generated_suites/sharded_collections_jscore_passthrough_with_replica_set_write_blocking.yml",
+    shard_count = 16,
+    tags = [
+        "common",
+        "incompatible_mac",
+        "jscore",
+        "replica_set_write_blocking",
+        "sharding",
+    ],
+    target_compatible_with = select({
+        "@platforms//os:macos": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//src/mongo/db:mongod",
+        "//src/mongo/s:mongos",
+        "//src/mongo/shell:mongo",
+    ],
+)
+
+resmoke_suite_test(
+    name = "sharded_collections_jscore_passthrough_with_user_write_blocking",
+    size = "large",
+    config = "//buildscripts/resmokeconfig:matrix_suites/generated_suites/sharded_collections_jscore_passthrough_with_user_write_blocking.yml",
+    shard_count = 16,
+    tags = [
+        "common",
+        "incompatible_mac",
+        "jscore",
+        "sharding",
+        "user_write_blocking",
+    ],
+    target_compatible_with = select({
+        "@platforms//os:macos": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//src/mongo/db:mongod",
+        "//src/mongo/s:mongos",
+        "//src/mongo/shell:mongo",
+    ],
+)
+
+resmoke_suite_test(
+    name = "sharding_jscore_passthrough_with_replica_set_write_blocking",
+    size = "large",
+    config = "//buildscripts/resmokeconfig:matrix_suites/generated_suites/sharding_jscore_passthrough_with_replica_set_write_blocking.yml",
+    shard_count = 26,
+    tags = [
+        "common",
+        "incompatible_mac",
+        "jscore",
+        "replica_set_write_blocking",
+        "sharding",
+    ],
+    target_compatible_with = select({
+        "@platforms//os:macos": ["@platforms//:incompatible"],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "//src/mongo/db:mongod",
+        "//src/mongo/s:mongos",
+        "//src/mongo/shell:mongo",
+    ],
+)
+
+resmoke_suite_test(
     name = "change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough",
     config = "//buildscripts/resmokeconfig:matrix_suites/generated_suites/change_streams_pre_images_replica_sets_kill_secondary_jscore_passthrough.yml",
     shard_count = 10,
@@ -382,7 +473,6 @@ resmoke_suite_test(
         "ci-default",
         "jscore",
         "replica_sets",
-        "requires_replicated_fast_count_recovery",
         "suggested_excluding_required__for_devprod_mitigation_only",
     ],
     deps = [
@@ -519,7 +609,7 @@ resmoke_suite_test(
     config = "//buildscripts/resmokeconfig:matrix_suites/generated_suites/sharding_kill_stepdown_terminate_jscore_passthrough.yml",
     shard_count = 9,
     tags = [
-        "ci-release-critical",
+        "ci-all-variants",
         "common",
         "jscore",
         "sharding",
@@ -623,7 +713,6 @@ resmoke_suite_test(
     tags = [
         "ci-default",
         "jscore",
-        "requires_replicated_fast_count_recovery",
     ],
     deps = [
         "//src/mongo/db:mongod",
@@ -713,7 +802,7 @@ resmoke_suite_test(
     config = "//buildscripts/resmokeconfig:suites/concurrency_sharded_with_config_shard.yml",
     shard_count = 50,
     tags = [
-        "ci-release-critical",
+        "ci-all-variants",
         "cluster_scalability_only",
         "common",
         "concurrency",
@@ -741,7 +830,7 @@ resmoke_suite_test(
     config = "//buildscripts/resmokeconfig:suites/concurrency_sharded_with_balancer_and_config_shard.yml",
     shard_count = 33,
     tags = [
-        "ci-release-critical",
+        "ci-all-variants",
         "cluster_scalability_only",
         "common",
         "concurrency",
@@ -770,7 +859,6 @@ resmoke_suite_test(
     shard_count = 50,
     tags = [
         "ci-default",
-        "requires_replicated_fast_count_recovery",
         "sharding",
     ],
     deps = [
@@ -804,7 +892,6 @@ resmoke_suite_test(
     shard_count = 49,
     tags = [
         "ci-default",
-        "requires_replicated_fast_count_recovery",
         "sharding",
     ],
     deps = [

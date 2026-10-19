@@ -35,6 +35,7 @@
 #include "mongo/unittest/server_parameter_guard.h"
 #include "mongo/unittest/unittest.h"
 
+#include <algorithm>
 #include <cstddef>
 #include <memory>
 #include <string>
@@ -89,6 +90,55 @@ public:
      */
     const QuerySolution* bestCBRPlan(CanonicalQuery* cq, size_t numDocs) {
         return plan_ranking_tests::bestCBRPlan(cq, numDocs, _opCtx, N, _bestCBRPlan, nss);
+    }
+
+    /**
+     * Assert that CBR could not estimate some of the plans for 'cq' (e.g. a zero input cardinality
+     * estimate on an index scan) and handed them to the multi-planner along with the best of the
+     * plans it did estimate, if any, which must match 'expectedBestEstimablePlan'. The plans CBR
+     * estimated but did not pick are rejected. Returns the number of plans handed to the
+     * multi-planner.
+     */
+    size_t assertCBRDefersInestimablePlans(
+        CanonicalQuery* cq,
+        size_t numDocs,
+        const boost::optional<std::string>& expectedBestEstimablePlan) {
+        std::vector<size_t> originalPlanHashes;
+        auto solutions = plan_ranking_tests::cbrRankPlans(cq,
+                                                          numDocs,
+                                                          _opCtx,
+                                                          N,
+                                                          nss,
+                                                          SamplingCEMethodEnum::kRandom,
+                                                          boost::none /* numChunks */,
+                                                          boost::none /* times */,
+                                                          originalPlanHashes);
+        ASSERT_GREATER_THAN(solutions.size(), 1U);
+        ASSERT_LESS_THAN_OR_EQUALS(solutions.size(), originalPlanHashes.size());
+
+        // The best estimable plan, if any, comes first.
+        auto deferred = solutions.begin();
+        if (expectedBestEstimablePlan) {
+            ASSERT(QueryPlannerTestLib::solutionMatches(*expectedBestEstimablePlan,
+                                                        solutions.front()->root())
+                       .isOK())
+                << solutions.front()->toString();
+            ++deferred;
+        } else {
+            ASSERT_EQ(originalPlanHashes.size(), solutions.size());
+        }
+
+        // The inestimable plans follow in the planner's original order. Multi-planner score
+        // ordering is stable for ties, so reordering them would let the winner depend on the
+        // order in which CBR happened to estimate the plans.
+        auto original = originalPlanHashes.begin();
+        for (; deferred != solutions.end(); ++deferred) {
+            original = std::find(original, originalPlanHashes.end(), (*deferred)->hash());
+            ASSERT(original != originalPlanHashes.end())
+                << "inestimable plan out of order: " << (*deferred)->toString();
+            ++original;
+        }
+        return solutions.size();
     }
 
     /**
@@ -312,12 +362,11 @@ public:
         auto soln = pickBestPlan(cq.get());
         ASSERT(QueryPlannerTestLib::solutionMatches(expectedMPPlan, soln->root()).isOK());
 
-        // In fact, the optimal plan is
-        const std::string expectedCBRPlan(
-            "{fetch: {filter: {a:1}, node: "
-            "{ixscan: {filter: null, pattern: {b:1}}}}}");
-        auto cbrSoln = bestCBRPlan(cq.get(), N);
-        ASSERT(QueryPlannerTestLib::solutionMatches(expectedCBRPlan, cbrSoln->root()).isOK());
+        // 'b > 1' matches nothing, so the plans scanning {b: 1} (alone or intersected) see a zero
+        // input estimate (ZeroCEEstimate). CBR defers its ranking to the multi-planner along with
+        // the only estimable plan, the one scanning {a: 1}.
+        assertCBRDefersInestimablePlans(
+            cq.get(), N, std::string{"{fetch: {node: {ixscan: {pattern: {a: 1}}}}}"});
 
         // Confirm that a backup plan is available.
         ASSERT(hasBackupPlan());
@@ -432,11 +481,9 @@ public:
         auto soln = pickBestPlan(cq.get());
         ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, soln->root()).isOK());
 
-        // Both plans see CE = 0 from the sampler. CardinalityEstimator::clampZeroEstimates
-        // floors approximate zeros to kMinCE and the CostEstimator's additive per-stage minimum
-        // breaks the resulting tie in favour of the structurally cheaper covered plan.
-        auto cbrSoln = bestCBRPlan(cq.get(), N);
-        ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, cbrSoln->root()).isOK());
+        // Both plans see CE = 0 from the sampler on their scan nodes (ZeroCEEstimate), so CBR
+        // estimates neither and hands both to the multi-planner.
+        assertCBRDefersInestimablePlans(cq.get(), N, boost::none /* expectedBestEstimablePlan */);
     }
 };
 
@@ -468,8 +515,11 @@ public:
         const std::string bestPlan("{fetch: {filter: {b:1}, node: {ixscan: {pattern: {a: 1}}}}}");
         auto soln = pickBestPlan(cq.get());
         ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, soln->root()).isOK());
-        auto cbrSoln = bestCBRPlan(cq.get(), N);
-        ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, cbrSoln->root()).isOK());
+        // 'a = N+1' matches nothing, so the plans scanning {a: 1} (alone or intersected) see a
+        // zero input estimate (ZeroCEEstimate). CBR hands them to the multi-planner along with the
+        // only estimable plan, the one scanning {b: 1}.
+        assertCBRDefersInestimablePlans(
+            cq.get(), N, std::string{"{fetch: {node: {ixscan: {pattern: {b: 1}}}}}"});
     }
 };
 
@@ -505,8 +555,11 @@ public:
         const std::string bestPlan("{fetch: {filter: {b:1}, node: {ixscan: {pattern: {a: 1}}}}}");
         auto soln = pickBestPlan(cq.get());
         ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, soln->root()).isOK());
-        auto cbrSoln = bestCBRPlan(cq.get(), N);
-        ASSERT(QueryPlannerTestLib::solutionMatches(bestPlan, cbrSoln->root()).isOK());
+        // 'a >= N+1' matches nothing, so the plans scanning {a: 1} (alone or intersected) see a
+        // zero input estimate (ZeroCEEstimate). CBR hands them to the multi-planner along with the
+        // only estimable plan, the one scanning {b: 1}.
+        assertCBRDefersInestimablePlans(
+            cq.get(), N, std::string{"{fetch: {node: {ixscan: {pattern: {b: 1}}}}}"});
     }
 };
 

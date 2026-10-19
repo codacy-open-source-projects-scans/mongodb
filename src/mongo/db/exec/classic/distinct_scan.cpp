@@ -157,13 +157,14 @@ PlanStage::StageState DistinctScan::doFetch(WorkingSetMember* member,
 
             return ADVANCED;
         },
+        /*yieldHandler=*/
         [&] {
             // Ensure that the BSONObj underlying the WorkingSetMember is owned because it may be
             // freed when we yield.
             member->makeObjOwnedIfNeeded();
             _idRetrying = id;
             *out = WorkingSet::INVALID_ID;
-        } /* yieldHandler */);
+        });
 }
 
 PlanStage::StageState DistinctScan::doWork(WorkingSetID* out) {
@@ -196,9 +197,7 @@ PlanStage::StageState DistinctScan::doWork(WorkingSetID* out) {
                     _seekPoint, _scanDirection == 1, builder));
             return PlanStage::ADVANCED;
         },
-        [&] {
-            *out = WorkingSet::INVALID_ID;
-        } /* yieldHandler */);
+        /*yieldHandler=*/[&] { *out = WorkingSet::INVALID_ID; });
 
     if (ret != PlanStage::ADVANCED) {
         return ret;
@@ -217,17 +216,17 @@ PlanStage::StageState DistinctScan::doWork(WorkingSetID* out) {
                                                view.getVersion());
 
     switch (_checker.checkKey(dehydratedKey, &_seekPoint)) {
-        case IndexBoundsChecker::MUST_ADVANCE: {
+        case KeyState::MUST_ADVANCE: {
             // Try again next time. The checker has adjusted the _seekPoint.
             return PlanStage::NEED_TIME;
         }
-        case IndexBoundsChecker::DONE: {
+        case KeyState::DONE: {
             // There won't be a next time.
             _commonStats.isEOF = true;
             _cursor.reset();
             return IS_EOF;
         }
-        case IndexBoundsChecker::VALID: {
+        case KeyState::VALID: {
             if (_replaceUndefinedWithNull) {
                 // The empty array gets the same group key as the 'undefined' BSON value but
                 // produces a null group key when unwound. Note that rewriting undefined to null

@@ -9,15 +9,14 @@ exports_files([
     "cheetah_source_generator.py",
     "clang_tidy_config_gen.py",
     "jstoh.py",
+    "msitrim.py",
     "pip_requirements.py",
     "symbols.orderfile",
     "symbols-al2023.orderfile",
 ])
 
-py_binary(
-    name = "msitrim",
-    srcs = ["msitrim.py"],
-    main = "msitrim.py",
+py_library(
+    name = "msitrim_deps",
     visibility = ["//visibility:public"],
     deps = select({
         "@platforms//os:windows": [
@@ -28,6 +27,14 @@ py_binary(
         ],
         "//conditions:default": [],
     }),
+)
+
+py_binary(
+    name = "msitrim",
+    srcs = ["msitrim.py"],
+    main = "msitrim.py",
+    visibility = ["//visibility:public"],
+    deps = [":msitrim_deps"],
 )
 
 py_binary(
@@ -651,6 +658,13 @@ py_binary(
     ],
 )
 
+py_binary(
+    name = "gdb_rbe_sysroot",
+    srcs = ["gdb_rbe_sysroot.py"],
+    main = "gdb_rbe_sysroot.py",
+    visibility = ["//buildscripts/tests:__pkg__"],
+)
+
 # Markdown link linter
 py_binary(
     name = "markdown_link_linter",
@@ -886,6 +900,19 @@ py_library(
 )
 
 py_library(
+    name = "fully_disabled_feature_flag_tags_check",
+    srcs = ["fully_disabled_feature_flag_tags_check.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts/resmokelib",
+        dependency(
+            "pyyaml",
+            group = "core",
+        ),
+    ],
+)
+
+py_library(
     name = "generate_version_expansions",
     srcs = ["generate_version_expansions.py"],
     visibility = ["//visibility:public"],
@@ -1013,6 +1040,27 @@ py_library(
         dependency(
             "typing-extensions",
             group = "core",
+        ),
+    ],
+)
+
+py_library(
+    name = "create_todo_tickets",
+    srcs = ["create_todo_tickets.py"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//buildscripts/client:jiraclient",
+        dependency(
+            "codeowners",
+            group = "modules_poc",
+        ),
+        dependency(
+            "pyyaml",
+            group = "core",
+        ),
+        dependency(
+            "structlog",
+            group = "evergreen",
         ),
     ],
 )

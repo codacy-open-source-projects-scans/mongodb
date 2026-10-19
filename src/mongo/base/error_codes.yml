@@ -1368,5 +1368,14 @@ error_codes:
   # should not be retried again.
   - {code: 528, name: KMIPRetryableError}
 
+  # Sampling estimated that an index scan in a candidate plan scans zero keys ("CE" is cardinality
+  # estimation). Used internally to treat that plan as non-estimable and let the multi-planner rank
+  # it; it is never returned to the client.
+  - {
+      code: 529,
+      name: ZeroCEEstimate,
+      categories: [PlannerEstimationError, InternalOnly],
+    }
+
   # ^^^^
   # Add new codes, sequentially numbered, above.

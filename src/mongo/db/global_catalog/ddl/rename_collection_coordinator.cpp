@@ -256,71 +256,6 @@ void checkCatalogConsistencyAcrossShards(OperationContext* opCtx,
     }
 }
 
-/**
- * Best-effort check that no index builds are in progress on the given namespaces across all
- * participant shards. This mirrors the replica-set behavior where renameCollection fails
- * immediately with BackgroundOperationInProgressForNamespace if an index build is ongoing.
- * The check is best-effort because an index build could start after this check.
- */
-void checkForInProgressIndexBuildsAcrossShards(
-    OperationContext* opCtx,
-    const std::vector<NamespaceString>& nsses,
-    std::shared_ptr<executor::ScopedTaskExecutor> executor,
-    const CancellationToken& token) {
-    auto shardIds = Grid::get(opCtx)->shardRegistry()->getAllShardIds(opCtx);
-
-    for (const auto& nss : nsses) {
-        ListIndexes listIndexesCmd(nss);
-        listIndexesCmd.setIncludeIndexBuildInfo(true);
-        listIndexesCmd.setDbName(nss.dbName());
-        auto opts = std::make_shared<async_rpc::AsyncRPCOptions<ListIndexes>>(
-            **executor, token, listIndexesCmd);
-        auto responses = sharding_ddl_util::sendAuthenticatedCommandToShards(
-            opCtx, opts, shardIds, /*throwOnError=*/false);
-
-        for (const auto& cmdResponse : responses) {
-            // Best-effort: skip shards where the collection doesn't exist or is a view (the
-            // collection is unsharded and only lives on the primary shard; views don't have
-            // indexes). Re-throw unexpected errors.
-            const auto status = AsyncRequestsSender::Response::getEffectiveStatus(cmdResponse);
-            if (!status.isOK()) {
-                if (status.code() == ErrorCodes::NamespaceNotFound ||
-                    status.code() == ErrorCodes::CommandNotSupportedOnView) {
-                    continue;
-                }
-                uassertStatusOK(status);
-            }
-
-            const auto& replyData = cmdResponse.swResponse.getValue().data;
-
-            // The listIndexes reply contains a cursor subdocument with firstBatch and id.
-            // The storage engine allows at most 64 indexes per collection, the total should be
-            // well under the 16MB batch limit. In the off-chance it is not, log a warning and
-            // proceed with firstBatch only, given that the check is best-effort.
-            const auto cursorObj = replyData["cursor"];
-            const auto cursorId = cursorObj["id"].numberLong();
-            if (cursorId != 0) {
-                LOGV2_WARNING(11762400,
-                              "listIndexes reply has unexhausted cursor; "
-                              "index build check may be incomplete",
-                              "nss"_attr = nss,
-                              "shard"_attr = cmdResponse.shardId,
-                              "cursorId"_attr = cursorId);
-            }
-
-            for (const auto& indexEntry : cursorObj["firstBatch"].Array()) {
-                if (indexEntry["indexBuildInfo"].type() != BSONType::eoo) {
-                    uasserted(ErrorCodes::BackgroundOperationInProgressForNamespace,
-                              str::stream()
-                                  << "cannot perform rename: an index build is currently "
-                                  << "running for collection " << nss.toStringForErrorMsg()
-                                  << " on shard " << cmdResponse.shardId.toString());
-                }
-            }
-        }
-    }
-}
-
 // TODO (SERVER-98118): Remove this method (assuming a true condition on each invocation)
 // once v9.0 become last-lts.
 bool supportsPreciseChangeStreamTargeter(OperationContext* opCtx) {
@@ -410,7 +345,7 @@ void updateUnsplittableCollChunkStmt(const txn_api::TransactionClient& txnClient
         return updateOp;
     }());
 
-    const auto response = txnClient.runCRUDOpSync(request, {-1} /*stmtIds*/);
+    const auto response = txnClient.runCRUDOpSync(request, /*stmtIds=*/{-1});
     uassertStatusOK(response.toStatus());
     // Only one chunk should have been updated (unless the transaction is repeated due to a
     // stepdown).
@@ -494,7 +429,7 @@ void renameCollectionMetadataInTransaction(
                 stmtId++);
             // Log the placement change of FROM.
             sharding_ddl_util::upsertPlacementHistoryDocInTransaction(
-                txnClient, fromNss, fromUUID, commitTime, {} /*shards*/, stmtId++);
+                txnClient, fromNss, fromUUID, commitTime, /*shards=*/{}, stmtId++);
             // Reassign original zones to the renamed collection entry.
             sharding_ddl_util::updateZonesInTransaction(txnClient, fromNss, toNss);
             // A rename request across databases (only allowed when FROM is unsharded or
@@ -600,6 +535,17 @@ logv2::DynamicAttributes RenameCollectionCoordinator::getCoordinatorLogAttrs() c
 std::set<NamespaceString> RenameCollectionCoordinator::_getAdditionalLocksToAcquire(
     OperationContext* opCtx) {
     return {_request.getTo()};
+}
+
+std::set<NamespaceString> RenameCollectionCoordinator::_conflictingIndexBuildNamespaces(
+    ShardingCoordinator& self, OperationContext* opCtx) {
+    std::set<NamespaceString> retVal{nss()};
+
+    if (_doc.getDropTarget()) {
+        retVal.insert(_request.getTo());
+    }
+
+    return retVal;
 }
 
 void RenameCollectionCoordinator::appendCommandInfo(BSONObjBuilder* cmdInfoBuilder) const {
@@ -726,7 +672,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                     const auto optTargetCollType =
                         sharding_ddl_util::getCollectionFromConfigServer(opCtx, toNss);
                     _doc.setTargetUUID(getCollectionUUID(
-                        opCtx, toNss, optTargetCollType, /*throwNotFound*/ false));
+                        opCtx, toNss, optTargetCollType, /*throwOnNotFound=*/false));
 
                     checkDatabaseRestrictions(opCtx, fromNss, optSourceCollType, toNss);
 
@@ -752,7 +698,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                             toNss,
                             criticalSectionReason,
                             ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
-                            !isAuthoritative /* clearShardCatalogCache */);
+                            /*clearShardCatalogCache=*/!isAuthoritative);
                         criticalSection->promoteRecoverableCriticalSectionToBlockAlsoReads(
                             opCtx,
                             toNss,
@@ -783,17 +729,6 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                                                         _doc.getDropTarget(),
                                                         executor,
                                                         token);
-
-                    // Best-effort check for in-progress index builds on the source and target
-                    // (when dropTarget is true) across all shards, mirroring replica-set behavior.
-                    // This prevents acquiring the critical section and then retrying indefinitely
-                    // while CRUD is blocked (SERVER-117624).
-                    auto nssesToCheck = std::vector<NamespaceString>{fromNss};
-                    if (_doc.getDropTarget()) {
-                        nssesToCheck.push_back(toNss);
-                    }
-
-                    checkForInProgressIndexBuildsAcrossShards(opCtx, nssesToCheck, executor, token);
 
                     if (_doc.getRenameCollectionRequest().getTargetMustNotBeSharded().get_value_or(
                             false)) {
@@ -839,7 +774,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
                         criticalSectionReason,
                         ShardingCatalogClient::writeConcernLocalHavingUpstreamWaiter(),
                         ShardingRecoveryService::NoCustomAction(),
-                        false /* throwIfReasonDiffers */);
+                        /*throwIfReasonDiffers=*/false);
                     _completeOnError = true;
                     throw;
                 }
@@ -888,7 +823,7 @@ ExecutorFuture<void> RenameCollectionCoordinator::_runImpl(
             }))
         .then(_buildPhaseHandler(
             Phase::kSetupChangeStreamsPreconditions,
-            supportsPreciseChangeStreamTargeter /*shouldExecute*/,
+            /*shouldExecute=*/supportsPreciseChangeStreamTargeter,
             [this, token, executor = executor, anchor = shared_from_this()](auto* opCtx) {
                 const auto& fromNss = nss();
                 const auto& toNss = _request.getTo();

@@ -1036,14 +1036,14 @@ long long CollectionImpl::getCappedMaxSize() const {
 long long CollectionImpl::numRecords(OperationContext* opCtx) const {
     return (shouldReadFromReplicatedFastCount(opCtx, _ns))
         ? _shared->_recordStore->accurateNumRecords() +
-            UncommittedFastCountChanges::getForRead(opCtx).find(uuid()).count
+            UncommittedFastCountChanges::find(opCtx, uuid()).count
         : _shared->_recordStore->numRecords();
 }
 
 long long CollectionImpl::dataSize(OperationContext* opCtx) const {
     return (shouldReadFromReplicatedFastCount(opCtx, _ns))
         ? _shared->_recordStore->accurateDataSize() +
-            UncommittedFastCountChanges::getForRead(opCtx).find(uuid()).size
+            UncommittedFastCountChanges::find(opCtx, uuid()).size
         : _shared->_recordStore->dataSize();
 }
 
@@ -1180,7 +1180,7 @@ Status CollectionImpl::setValidationOptions(
             // validator may have been well formed on the version that wrote it. Keeping it
             // rejects writes to the collection (fail closed) rather than allowing them
             // unvalidated (SERVER-134863).
-            if (opCtx->writesAreReplicated()) {
+            if (opCtx->isEnforcingConstraints()) {
                 return _validator.getStatus();
             }
             LOGV2_WARNING(13486300,

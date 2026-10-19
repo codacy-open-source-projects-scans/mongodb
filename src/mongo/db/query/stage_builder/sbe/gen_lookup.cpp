@@ -22,6 +22,7 @@
 #include "mongo/db/query/stage_builder/sbe/gen_helpers.h"
 #include "mongo/db/query/stage_builder/sbe/gen_index_scan.h"
 #include "mongo/db/query/stage_builder/sbe/gen_projection.h"
+#include "mongo/db/query/stage_builder/sbe/sbe_stage_blueprint.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr.h"
 #include "mongo/db/query/stage_builder/sbe/sbexpr_helpers.h"
 #include "mongo/util/assert_util.h"
@@ -29,6 +30,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <tuple>
 #include <utility>
 
 #include <boost/none.hpp>
@@ -43,15 +45,6 @@ namespace mongo::stage_builder {
  * Helpers for building $lookup.
  */
 namespace {
-
-enum class KeyType {
-    // Key is a regular array.
-    kArray,
-
-    // Key is an array whose values are deduplicated.
-    kArraySet,
-};
-
 /**
  * De-facto MQL semantics for matching local or foreign records to 'null' is complex and therefore
  * is causing complex SBE trees to implement it. This comment describes the semantics.
@@ -402,12 +395,11 @@ std::pair<SbSlot /* keyValuesSetSlot */, SbStage> buildKeySetForIndexScan(StageB
 // If the stream produces no values, that is, would result in an empty set, the empty set is
 // replaced with a set that contains a single 'null' value, so that it matches MQL semantics when
 // empty arrays and all missing are matched to 'null'.
-std::pair<SbSlot /* keyValuesSlot */, SbStage> buildKeySetForLocal(StageBuilderState& state,
-                                                                   SbStage inputStage,
-                                                                   const PlanStageSlots& slots,
-                                                                   const FieldPath& fp,
-                                                                   const PlanNodeId nodeId,
-                                                                   KeyType keyType) {
+std::pair<SbSlot /* keyValuesSetSlot */, SbStage> buildKeySetForLocal(StageBuilderState& state,
+                                                                      SbStage inputStage,
+                                                                      const PlanStageSlots& slots,
+                                                                      const FieldPath& fp,
+                                                                      const PlanNodeId nodeId) {
     SbBuilder b(state, nodeId);
 
     auto [arrayWithNullTag, arrayWithNullVal] = sbe::value::makeNewArray();
@@ -438,20 +430,12 @@ std::pair<SbSlot /* keyValuesSlot */, SbStage> buildKeySetForLocal(StageBuilderS
                           SbLocalVar{frameId, 0}),
                  b.makeFunction(sbe::EFn::kNewArray, b.makeFillEmptyNull(SbLocalVar{frameId, 0}))));
 
-    // Convert the array into an ArraySet that has no duplicate keys. This de-duplication of the
-    // outer (probe) key can be skipped on the hash-join path, because the hash lookup
-    // implementation already de-duplicates the keys while probing. Skipping the per-row ArraySet
-    // construction avoids redundant allocation churn on the $lookup hot path. Note that for
-    // 'KeyType::kArray' the resulting array may well contain duplicate values (e.g. for a local
-    // field {lkey: [1, 1, 2]}), so consumers of a 'kArray' key must not rely on the values being
-    // distinct.
-    if (keyType == KeyType::kArraySet) {
-        if (state.getCollatorSlot()) {
-            expr = b.makeFunction(
-                sbe::EFn::kCollArrayToSet, SbSlot{*state.getCollatorSlot()}, std::move(expr));
-        } else {
-            expr = b.makeFunction(sbe::EFn::kArrayToSet, std::move(expr));
-        }
+    // Convert the array into an ArraySet that has no duplicate keys.
+    if (state.getCollatorSlot()) {
+        expr = b.makeFunction(
+            sbe::EFn::kCollArrayToSet, SbSlot{*state.getCollatorSlot()}, std::move(expr));
+    } else {
+        expr = b.makeFunction(sbe::EFn::kArrayToSet, std::move(expr));
     }
 
     auto [outStage, outSlots] =
@@ -472,6 +456,8 @@ std::pair<SbSlot /* keyValuesSetSlot */, SbStage> buildKeySetForForeign(
     const PlanStageSlots& inputSlots,
     const FieldPath& fp,
     const PlanNodeId nodeId) {
+    // The foreign key set's reads must not influence trial runs of the outer side.
+    NoTrialRunTrackingGuard noTrialRunTracking{state.blueprint()};
     SbBuilder b(state, nodeId);
 
     auto inputSlot = inputSlots.getResultObj();
@@ -680,7 +666,7 @@ std::pair<SbSlot /* matched docs */, SbStage> buildForeignMatches(SbSlot localKe
             filter = b.makeFunction(sbe::EFn::kTraverseF,
                                     var,
                                     std::move(arrayLambda),
-                                    b.makeBoolConstant(isLeafField) /*compareArray*/);
+                                    /*compareArray=*/b.makeBoolConstant(isLeafField));
             if (!state.legacyDottedPathNullSemantics) {
                 if (!isLeafField) {
                     // If the result of getField() was Nothing or a scalar value, then don't bother
@@ -761,6 +747,39 @@ std::pair<SbSlotVector /*inner projects*/, SbStage> buildLoopJoinInnerProjects(
     return {innerProj, std::move(aggStage)};
 }  // buildLoopJoinInnerProjects
 
+/**
+ * Builds the inner side of a loop join $lookup: the foreign records of 'foreignStage' that match
+ * the local keys in 'localKeySlot'.
+ *
+ * Returns the slot holding the matched foreign records, the inner slots to be used in projections
+ * and the inner stage.
+ */
+std::tuple<SbSlot /* matched docs */, SbSlotVector /* inner projects */, SbStage>
+buildLoopJoinInnerSide(StageBuilderState& state,
+                       SbSlot localKeySlot,
+                       SbStage foreignStage,
+                       SbSlot foreignRecordSlot,
+                       const FieldPath& foreignFieldName,
+                       SbSlot topLevelFieldSlot,
+                       const PlanNodeId nodeId,
+                       bool hasUnwindSrc,
+                       boost::optional<sbe::value::SlotId> indexSlotId) {
+    // The inner side's reads must not influence trial runs of the outer side.
+    NoTrialRunTrackingGuard noTrialRunTracking{state.blueprint()};
+
+    auto [matchedRecordsSlot, matchesStage] = buildForeignMatches(localKeySlot,
+                                                                  std::move(foreignStage),
+                                                                  foreignRecordSlot,
+                                                                  foreignFieldName,
+                                                                  topLevelFieldSlot,
+                                                                  nodeId,
+                                                                  state,
+                                                                  hasUnwindSrc);
+    auto [innerProj, innerStage] = buildLoopJoinInnerProjects(
+        state, std::move(matchesStage), nodeId, matchedRecordsSlot, indexSlotId);
+    return {matchedRecordsSlot, std::move(innerProj), std::move(innerStage)};
+}  // buildLoopJoinInnerSide
+
 std::pair<SbSlot /* matched docs */, SbStage> buildNljLookupStage(
     StageBuilderState& state,
     SbStage localStage,
@@ -781,8 +800,8 @@ std::pair<SbSlot /* matched docs */, SbStage> buildNljLookupStage(
     }
 
     // Build the outer branch that produces the set of local key values.
-    auto [localKeySlot, outerRootStage] = buildKeySetForLocal(
-        state, std::move(localStage), slots, localFieldName, nodeId, KeyType::kArraySet);
+    auto [localKeySlot, outerRootStage] =
+        buildKeySetForLocal(state, std::move(localStage), slots, localFieldName, nodeId);
 
     auto foreignRecordSlot = foreignSlots.getResultObj();
     auto foreignFieldNameSlot = foreignSlots.get(
@@ -790,21 +809,16 @@ std::pair<SbSlot /* matched docs */, SbStage> buildNljLookupStage(
     // Build the inner branch that will get the foreign key values, compare them to the local key
     // values and accumulate all matching foreign records into an array that is placed into
     // 'matchedRecordsSlot'.
-    auto [matchedRecordsSlot, innerStage] = buildForeignMatches(localKeySlot,
-                                                                std::move(foreignStage),
-                                                                foreignRecordSlot,
-                                                                foreignFieldName,
-                                                                foreignFieldNameSlot,
-                                                                nodeId,
-                                                                state,
-                                                                unwindSpec.has_value());
-
-    auto [innerProj, innerRootStage] = buildLoopJoinInnerProjects(
-        state, std::move(innerStage), nodeId, matchedRecordsSlot, indexSlot);
-
-    // 'innerRootStage' should not participate in trial run tracking as the number of reads that
-    // it performs should not influence planning decisions made for 'outerRootStage'.
-    innerRootStage->disableTrialRunTracking();
+    auto [matchedRecordsSlot, innerProj, innerRootStage] =
+        buildLoopJoinInnerSide(state,
+                               localKeySlot,
+                               std::move(foreignStage),
+                               foreignRecordSlot,
+                               foreignFieldName,
+                               foreignFieldNameSlot,
+                               nodeId,
+                               unwindSpec.has_value(),
+                               indexSlot);
 
     SbSlot localRecordSlot = slots.getResultObj();
     // Connect the two branches with a nested loop join. For each outer record with a corresponding
@@ -816,9 +830,9 @@ std::pair<SbSlot /* matched docs */, SbStage> buildNljLookupStage(
     SbStage nlj = b.makeLoopJoin(std::move(outerRootStage),
                                  std::move(innerRootStage),
                                  buildLocalSlots(state, localRecordSlot),
-                                 SbExpr::makeSV(localKeySlot) /* outerCorrelated */,
-                                 std::move(innerProj) /* innerProjects */,
-                                 SbExpr{} /* predicate */,
+                                 /*outerCorrelated=*/SbExpr::makeSV(localKeySlot),
+                                 /*innerProjects=*/std::move(innerProj),
+                                 /*predicate=*/SbExpr{},
                                  joinType);
 
     return {matchedRecordsSlot, std::move(nlj)};
@@ -984,8 +998,8 @@ SbStage buildIndexSeek(StageBuilderState& state,
                 cursor->children()[0] =
                     b.makeLoopJoin(std::move(indexBoundKeyStage),
                                    std::move(cursor->children()[0]),
-                                   SbSlotVector{} /* outerProjects */,
-                                   SbExpr::makeSV(lowKeySlot, highKeySlot) /* outerCorrelated */);
+                                   /*outerProjects=*/SbSlotVector{},
+                                   /*outerCorrelated=*/SbExpr::makeSV(lowKeySlot, highKeySlot));
                 return indexStage;
             }
             for (auto& child : cursor->children()) {
@@ -998,8 +1012,8 @@ SbStage buildIndexSeek(StageBuilderState& state,
         // foreign document.
         return b.makeLoopJoin(std::move(indexBoundKeyStage),
                               std::move(indexStage),
-                              SbSlotVector{} /* outerProjects */,
-                              SbExpr::makeSV(lowKeySlot, highKeySlot) /* outerCorrelated */);
+                              /*outerProjects=*/SbSlotVector{},
+                              /*outerCorrelated=*/SbExpr::makeSV(lowKeySlot, highKeySlot));
     }
 }  // buildIndexSeek
 
@@ -1020,7 +1034,7 @@ SbStage buildIndexJoinLookupForeignSideStage(
 
     // Unwind local keys one by one into 'valueForIndexBound'.
     auto [valueGeneratorStage, valueForIndexBound, _] = b.makeUnwind(
-        std::move(localKeysSetStage), localKeysIndexSetSlot, true /*preserveNullAndEmptyArrays*/);
+        std::move(localKeysSetStage), localKeysIndexSetSlot, /*preserveNullAndEmptyArrays=*/true);
 
     // Create a very simple mapping from foreignFieldName to the SbSlot holding the local field
     // value.
@@ -1074,8 +1088,8 @@ std::pair<SbSlot, SbStage> buildIndexJoinLookupStage(
     }
 
     // Build the outer branch that produces the correlated local key slot.
-    auto [localKeysSetSlot, localKeysSetStage] = buildKeySetForLocal(
-        state, std::move(localStage), slots, localFieldName, nodeId, KeyType::kArraySet);
+    auto [localKeysSetSlot, localKeysSetStage] =
+        buildKeySetForLocal(state, std::move(localStage), slots, localFieldName, nodeId);
 
     // Build the inner branch that produces the correlated foreign key slot.
     auto scanNljStage = buildIndexJoinLookupForeignSideStage(state,
@@ -1094,21 +1108,16 @@ std::pair<SbSlot, SbStage> buildIndexJoinLookupStage(
     // those in 'localKeysSetSlot'. This is necessary because some values are encoded with the same
     // value in BTree index, such as undefined, null and empty array. In hashed indexes, hash
     // collisions are possible.
-    auto [foreignGroupSlot, foreignStage] = buildForeignMatches(localKeysSetSlot,
-                                                                std::move(scanNljStage),
-                                                                foreignRecordSlot,
-                                                                foreignFieldName,
-                                                                foreignFieldTopLevelSlot,
-                                                                nodeId,
-                                                                state,
-                                                                unwindSpec.has_value());
-
-    auto [innerProj, foreignGroupStage] = buildLoopJoinInnerProjects(
-        state, std::move(foreignStage), nodeId, foreignGroupSlot, indexSlot);
-
-    // 'foreignGroupStage' should not participate in trial run tracking as the number of reads
-    // that it performs should not influence planning decisions for 'localKeysSetStage'.
-    foreignGroupStage->disableTrialRunTracking();
+    auto [foreignGroupSlot, innerProj, foreignGroupStage] =
+        buildLoopJoinInnerSide(state,
+                               localKeysSetSlot,
+                               std::move(scanNljStage),
+                               foreignRecordSlot,
+                               foreignFieldName,
+                               foreignFieldTopLevelSlot,
+                               nodeId,
+                               unwindSpec.has_value(),
+                               indexSlot);
 
     SbSlot localRecordSlot = slots.getResultObj();
     // The top level loop join stage that joins each local field with the matched foreign
@@ -1119,9 +1128,9 @@ std::pair<SbSlot, SbStage> buildIndexJoinLookupStage(
     auto nljStage = b.makeLoopJoin(std::move(localKeysSetStage),
                                    std::move(foreignGroupStage),
                                    buildLocalSlots(state, localRecordSlot),
-                                   SbExpr::makeSV(localKeysSetSlot) /* outerCorrelated */,
-                                   std::move(innerProj) /* innerProjects */,
-                                   SbExpr{} /* predicate */,
+                                   /*outerCorrelated=*/SbExpr::makeSV(localKeysSetSlot),
+                                   /*innerProjects=*/std::move(innerProj),
+                                   /*predicate=*/SbExpr{},
                                    joinType);
     return {foreignGroupSlot, std::move(nljStage)};
 }  // buildIndexJoinLookupStage
@@ -1182,8 +1191,8 @@ std::pair<SbSlot, SbStage> buildDynamicIndexedLoopJoinLookupStage(
     }
 
     // Build the index Lookup branch
-    auto [localKeysSetSlot, localKeysSetStage] = buildKeySetForLocal(
-        state, std::move(localStage), slots, localFieldName, nodeId, KeyType::kArraySet);
+    auto [localKeysSetSlot, localKeysSetStage] =
+        buildKeySetForLocal(state, std::move(localStage), slots, localFieldName, nodeId);
 
     auto indexLookupBranchStage = buildIndexJoinLookupForeignSideStage(state,
                                                                        localKeysSetSlot,
@@ -1227,7 +1236,7 @@ std::pair<SbSlot, SbStage> buildDynamicIndexedLoopJoinLookupStage(
         return b.makeNot(b.makeFunction(sbe::EFn::kTraverseF,
                                         SbExpr{localKeysSetSlot},
                                         std::move(lambda),
-                                        b.makeBoolConstant(false) /*compareArray*/));
+                                        /*compareArray=*/b.makeBoolConstant(false)));
     };
 
     uint32_t typeMask = 0;
@@ -1271,7 +1280,7 @@ std::pair<SbSlot, SbStage> buildDynamicIndexedLoopJoinLookupStage(
         filterSlots.set(std::make_pair(PlanStageSlots::SlotType::kField, foreignFieldName.front()),
                         *localKeySlot);
         SbExpr satisfiesPartial =
-            generateFilter(state, partialFilterExpr, boost::none /*rootSlot*/, filterSlots);
+            generateFilter(state, partialFilterExpr, /*inputSlot=*/boost::none, filterSlots);
 
         if (!satisfiesPartial.isNull()) {
             // Use the index branch only if the document has exactly one key AND that key satisfies
@@ -1312,20 +1321,16 @@ std::pair<SbSlot, SbStage> buildDynamicIndexedLoopJoinLookupStage(
         SbExpr::makeSV(nestedLoopFallbackRecordSlot, nestedLoopFallbackFieldNameSlot));
 
     SbSlot resultSlot = branchSlots[0];
-    auto [finalForeignSlot, foreignMatchStage] = buildForeignMatches(localKeysSetSlot,
-                                                                     std::move(branchStage),
-                                                                     resultSlot,
-                                                                     foreignFieldName,
-                                                                     branchSlots[1],
-                                                                     nodeId,
-                                                                     state,
-                                                                     unwindSpec.has_value());
-    auto [innerProj, finalForeignStage] = buildLoopJoinInnerProjects(
-        state, std::move(foreignMatchStage), nodeId, finalForeignSlot, indexSlot);
-
-    //  'finalForeignStage' should not participate in trial run tracking as the number of
-    //  reads that it performs should not influence planning decisions for 'outerRootStage'.
-    finalForeignStage->disableTrialRunTracking();
+    auto [finalForeignSlot, innerProj, finalForeignStage] =
+        buildLoopJoinInnerSide(state,
+                               localKeysSetSlot,
+                               std::move(branchStage),
+                               resultSlot,
+                               foreignFieldName,
+                               branchSlots[1],
+                               nodeId,
+                               unwindSpec.has_value(),
+                               indexSlot);
 
     SbSlot localRecordSlot = slots.getResultObj();
     // Connect the local (left) and foreign (right) sides with a nested loop join. For each left
@@ -1342,8 +1347,8 @@ std::pair<SbSlot, SbStage> buildDynamicIndexedLoopJoinLookupStage(
                                  std::move(finalForeignStage),
                                  buildLocalSlots(state, localRecordSlot),
                                  std::move(outerCorrelated),
-                                 std::move(innerProj) /* innerProjects */,
-                                 SbExpr{} /* predicate */,
+                                 /*innerProjects=*/std::move(innerProj),
+                                 /*predicate=*/SbExpr{},
                                  joinType);
 
     return {finalForeignSlot, std::move(nlj)};
@@ -1369,19 +1374,12 @@ std::pair<SbSlot /*matched docs*/, SbStage> buildHashJoinLookupStage(
         CurOp::get(state.opCtx)->debug().lookupHashLookup += 1;
     }
 
-    // Build the outer branch that produces the correlated local key slot. On the hash-join path the
-    // outer (probe) key is left as a plain array; the hash table iterator de-duplicates the matched
-    // buffer indices while probing, so pre-deduping the outer key values via arrayToSet would only
-    // be redundant work on every outer document.
-    auto [localKeysSetSlot, localKeysSetStage] = buildKeySetForLocal(
-        state, std::move(localStage), slots, localFieldName, nodeId, KeyType::kArray);
+    // Build the outer branch that produces the correlated local key slot.
+    auto [localKeysSetSlot, localKeysSetStage] =
+        buildKeySetForLocal(state, std::move(localStage), slots, localFieldName, nodeId);
 
     auto [foreignKeySlot, foreignKeyStage] = buildKeySetForForeign(
         state, std::move(foreignStage), foreignSlots, foreignFieldName, nodeId);
-
-    // 'foreignKeyStage' should not participate in trial run tracking as the number of
-    // reads that it performs should not influence planning decisions for 'outerRootStage'.
-    foreignKeyStage->disableTrialRunTracking();
 
     auto foreignRecordSlot = foreignSlots.getResultObj();
 
@@ -1412,7 +1410,7 @@ std::pair<SbSlot /*matched docs*/, SbStage> buildHashJoinLookupStage(
                                                             foreignKeySlot,
                                                             foreignRecordSlot,
                                                             std::move(agg),
-                                                            boost::none /* optOutputSlot */,
+                                                            /*optOutputSlot=*/boost::none,
                                                             state.getCollatorSlot());
 
         // Add a projection that returns an empty array in the "as" field if no foreign row matched.
@@ -1466,7 +1464,7 @@ std::pair<SbStage, PlanStageSlots> buildLookupResultObject(SbStage stage,
                                                std::move(paths),
                                                std::move(nodes),
                                                localDocSlot,
-                                               nullptr /* slots */,
+                                               /*slots=*/nullptr,
                                                traversalDepth,
                                                shouldProduceBson);
 
@@ -1930,9 +1928,9 @@ std::pair<SbStage, PlanStageSlots> generateJoinResult(const BinaryJoinEmbeddingN
                                                    std::move(paths),
                                                    std::move(nodes),
                                                    rootDocumentSlot,
-                                                   nullptr /* slots */,
+                                                   /*slots=*/nullptr,
                                                    0,
-                                                   true /* shouldProduceBson */);
+                                                   /*shouldProduceBson=*/true);
 
                             SbBuilder b(state, node->nodeId());
                             auto [outStage, outSlots] =
@@ -2001,7 +1999,7 @@ std::pair<SbStage, PlanStageSlots> generateJoinResult(const BinaryJoinEmbeddingN
                                    std::move(paths),
                                    node->nodeId(),
                                    state,
-                                   true /* shouldProduceBson */);
+                                   /*shouldProduceBson=*/true);
 }
 
 /**
@@ -2248,8 +2246,8 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildNestedLoopJoinEmb
         b.makeLoopJoin(std::move(leftStage),
                        std::move(rightStage),
                        outerProjects,
-                       {} /* outerCorrelated */,
-                       {} /* innerProjects */,
+                       /*outerCorrelated=*/{},
+                       /*innerProjects=*/{},
                        b.makeBooleanOpTree(abt::Operations::And, std::move(equalityPredicates)));
 
     return generateJoinResult(nestedLoopJoinEmbeddingNode,
@@ -2446,7 +2444,7 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildIndexedJoinIndexP
                                                 collection,
                                                 indexName,
                                                 indexDescriptor->keyPattern(),
-                                                true /* forward */,
+                                                /*forward=*/true,
                                                 std::move(lowKey),
                                                 std::move(highKey),
                                                 ixScanReqs,
@@ -2616,8 +2614,8 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildIndexedJoinEmbedd
     auto indexStage =
         b.makeLoopJoin(std::move(leftStage),
                        std::move(outStage),
-                       projectedSlots /* outerProjects */,
-                       projectedSlots /* outerCorrelated */,
+                       /*outerProjects=*/projectedSlots,
+                       /*outerCorrelated=*/projectedSlots,
                        {}, /* innerProjects */
                        b.makeBooleanOpTree(abt::Operations::And, std::move(equalityPredicates)));
 

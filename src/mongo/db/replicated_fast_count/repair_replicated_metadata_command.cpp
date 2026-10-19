@@ -53,7 +53,8 @@ void _writeNoopOplogEntry(OperationContext* opCtx,
             boost::none,
             boost::none,
             boost::none);
-        UncommittedFastCountChanges::getForWrite(opCtx).record(
+        UncommittedFastCountChanges::record(
+            opCtx,
             collection.nss(),
             collection.uuid(),
             UncommittedFastCountChange{.delta = {.size = metadata.getSz().value_or(0),
@@ -93,6 +94,11 @@ public:
                     "Must be primary to run \"repairReplicatedMetadata\"",
                     replCoord->canAcceptWritesForDatabase(opCtx, DatabaseName::kAdmin));
 
+            const auto& metadata = request().getMetadata();
+            uassert(ErrorCodes::InvalidOptions,
+                    "Cannot specify both 'h' and 'hSet' in \"repairReplicatedMetadata\"",
+                    !(metadata.getH() && metadata.getHSet()));
+
             // Resolve and acquire the collection by UUID so the repair serializes with drops and
             // renames. Renames preserve the UUID, so retry if the collection moved; if it no
             // longer exists, the command is a true no-op.
@@ -114,7 +120,7 @@ public:
                                           opCtx, *nss, AcquisitionPrerequisites::kWrite),
                                       MODE_IX);
                 if (collection.exists() && collection.uuid() == uuid) {
-                    _writeNoopOplogEntry(opCtx, collection, request().getMetadata());
+                    _writeNoopOplogEntry(opCtx, collection, metadata);
                     return;
                 }
             }

@@ -113,7 +113,7 @@ protected:
         auto txnParticipant = TransactionParticipant::get(opCtx);
         txnParticipant.beginOrContinue(opCtx,
                                        {txnNumber},
-                                       false /* autocommit */,
+                                       /*autocommit=*/false,
                                        TransactionParticipant::TransactionActions::kStart);
 
         txnParticipant.unstashTransactionResources(opCtx, "ReplicatedFastCountTxns");
@@ -149,7 +149,7 @@ protected:
 
         txnParticipant.beginOrContinue(opCtx,
                                        {txnNumber},
-                                       false /* autocommit */,
+                                       /*autocommit=*/false,
                                        TransactionParticipant::TransactionActions::kContinue);
 
         txnParticipant.unstashTransactionResources(opCtx, "commitTransaction");
@@ -169,7 +169,7 @@ protected:
         auto txnParticipant = TransactionParticipant::get(opCtx);
         txnParticipant.beginOrContinue(opCtx,
                                        {txnNumber},
-                                       false /* autocommit */,
+                                       /*autocommit=*/false,
                                        TransactionParticipant::TransactionActions::kContinue);
 
         txnParticipant.unstashTransactionResources(opCtx, "abortTransaction");
@@ -548,7 +548,7 @@ protected:
 
         txnParticipant.beginOrContinue(opCtx,
                                        {txnNumber},
-                                       false /* autocommit */,
+                                       /*autocommit=*/false,
                                        TransactionParticipant::TransactionActions::kContinue);
         txnParticipant.unstashTransactionResources(opCtx, "prepareTransaction");
         auto prepareTs = txnParticipant.prepareTransaction(opCtx, {}).first;
@@ -573,7 +573,7 @@ protected:
 
         txnParticipant.beginOrContinue(opCtx,
                                        {txnNumber},
-                                       false /* autocommit */,
+                                       /*autocommit=*/false,
                                        TransactionParticipant::TransactionActions::kContinue);
         txnParticipant.unstashTransactionResources(opCtx, "commitTransaction");
         const auto commitTs = Timestamp(prepareTs.getSecs(), prepareTs.getInc() + 1);
@@ -636,7 +636,7 @@ protected:
 
         txnParticipant.beginOrContinue(opCtx,
                                        {txnNumber},
-                                       false /* autocommit */,
+                                       /*autocommit=*/false,
                                        TransactionParticipant::TransactionActions::kContinue);
         txnParticipant.unstashTransactionResources(opCtx, "prepareTransaction");
         txnParticipant.prepareTransaction(opCtx, {});
@@ -797,9 +797,10 @@ TEST_F(PreparedSizeMetadataTest, RestorePreciseCheckpointSeedsUncommittedFastCou
 
     // Before restoring, no uncommitted fast count changes have been seeded.
     {
-        const auto& uncommitted = UncommittedFastCountChanges::getForRead(_opCtx);
-        EXPECT_EQ(uncommitted.find(_uuid1), (CollectionSizeCount{.size = 0, .count = 0}));
-        EXPECT_EQ(uncommitted.find(_uuid2), (CollectionSizeCount{.size = 0, .count = 0}));
+        EXPECT_EQ(UncommittedFastCountChanges::find(_opCtx, _uuid1),
+                  (CollectionSizeCount{.size = 0, .count = 0}));
+        EXPECT_EQ(UncommittedFastCountChanges::find(_opCtx, _uuid2),
+                  (CollectionSizeCount{.size = 0, .count = 0}));
     }
 
     // Restoring from the checkpoint record re-seeds the uncommitted fast count changes from the
@@ -809,10 +810,9 @@ TEST_F(PreparedSizeMetadataTest, RestorePreciseCheckpointSeedsUncommittedFastCou
         restoreFromCheckpointAndGetSession(_opCtx, sessionId, txnNumber, std::move(recoveryRecord));
 
     {
-        const auto& uncommitted = UncommittedFastCountChanges::getForRead(_opCtx);
-        EXPECT_EQ(uncommitted.find(_uuid1),
+        EXPECT_EQ(UncommittedFastCountChanges::find(_opCtx, _uuid1),
                   (CollectionSizeCount{.size = docA.objsize() + docB.objsize(), .count = 2}));
-        EXPECT_EQ(uncommitted.find(_uuid2),
+        EXPECT_EQ(UncommittedFastCountChanges::find(_opCtx, _uuid2),
                   (CollectionSizeCount{.size = docC.objsize(), .count = 1}));
     }
 }

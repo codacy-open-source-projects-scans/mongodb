@@ -804,31 +804,6 @@ generateSingleIntervalIndexScanAndSlots(StageBuilderState& state,
     return {std::move(finalStage), std::move(finalOutputs), std::move(boundsSlots)};
 }
 
-std::pair<SbStage, PlanStageSlots> generateSingleIntervalIndexScan(StageBuilderState& state,
-                                                                   const CollectionPtr& collection,
-                                                                   const std::string& indexName,
-                                                                   const BSONObj& keyPattern,
-                                                                   bool forward,
-                                                                   SbExpr lowKeyExpr,
-                                                                   SbExpr highKeyExpr,
-                                                                   const PlanStageReqs& reqs,
-                                                                   PlanNodeId nodeId) {
-    PlanStageReqs ixScanReqs = computeReqsForIndexScan(reqs, keyPattern);
-
-    auto [stage, outputs] = generateSingleIntervalIndexScanImpl(state,
-                                                                collection,
-                                                                indexName,
-                                                                keyPattern,
-                                                                std::move(lowKeyExpr),
-                                                                std::move(highKeyExpr),
-                                                                ixScanReqs,
-                                                                nodeId,
-                                                                forward);
-
-    return setResultAndAdditionalFieldSlots(
-        std::move(stage), std::move(outputs), keyPattern, reqs, state, nodeId);
-}
-
 std::pair<SbStage, PlanStageSlots> generateIndexScanImpl(StageBuilderState& state,
                                                          const CollectionPtr& collection,
                                                          const IndexScanNode* ixn,
@@ -1021,17 +996,17 @@ std::pair<SbStage, PlanStageSlots> generateIndexScanWithDynamicBoundsImpl(
         intervalsRequired != IntervalsRequired::MultiInterval) {
         boost::optional<std::pair<SbSlot, SbSlot>> indexScanBoundsSlots;
         std::tie(stage, outputs, indexScanBoundsSlots) =
-            generateSingleIntervalIndexScanAndSlotsImpl(
-                state,
-                collection,
-                indexName,
-                keyPattern,
-                forward,
-                boost::none,
-                boost::none,
-                reqs,
-                ixn->nodeId(),
-                intervalsRequired == IntervalsRequired::EqualityInterval /* isPointInterval */);
+            generateSingleIntervalIndexScanAndSlotsImpl(state,
+                                                        collection,
+                                                        indexName,
+                                                        keyPattern,
+                                                        forward,
+                                                        boost::none,
+                                                        boost::none,
+                                                        reqs,
+                                                        ixn->nodeId(),
+                                                        /*isPointInterval=*/intervalsRequired ==
+                                                            IntervalsRequired::EqualityInterval);
         tassert(6484702, "lowKey and highKey runtime slots must be present", indexScanBoundsSlots);
         parameterizedScanSlots = {ParameterizedIndexScanSlots::SingleIntervalPlan{
             indexScanBoundsSlots->first.getId(), indexScanBoundsSlots->second.getId()}};

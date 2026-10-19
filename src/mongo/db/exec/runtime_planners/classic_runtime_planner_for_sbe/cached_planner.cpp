@@ -48,7 +48,7 @@ public:
                                            extractSbeYieldPolicy(),
                                            std::move(remoteCursors),
                                            std::move(remoteExplains),
-                                           boost::none /* cachedPlanHash */,
+                                           /*cachedPlanHash=*/boost::none,
                                            planSelectionStrategy());
     }
 
@@ -119,7 +119,6 @@ sbe::plan_ranker::CandidatePlan collectExecutionStatsForCachedPlan(
         .solution = std::move(solution),
         .root = std::move(root),
         .data = sbe::plan_ranker::CandidatePlanData{std::move(data)},
-        .exitedEarly = false,
         .status = Status::OK(),
         .fromPlanCache = true};
     ON_BLOCK_EXIT([rootPtr = candidate.root.get()] { rootPtr->detachFromTrialRunTracker(); });
@@ -140,8 +139,11 @@ sbe::plan_ranker::CandidatePlan collectExecutionStatsForCachedPlan(
                 MONGO_UNREACHABLE;
         }
     };
-    candidate.data.tracker = std::make_unique<TrialRunTracker>(
-        std::move(onMetricReached), maxTrialResultsFromPlanningRoot, maxTrialPeriodNumReads);
+    candidate.data.tracker = std::make_unique<TrialRunTracker>(std::move(onMetricReached),
+                                                               maxTrialResultsFromPlanningRoot,
+                                                               maxTrialPeriodNumReads,
+                                                               boost::none,
+                                                               boost::none);
     candidate.root->attachToTrialRunTracker(
         candidate.data.tracker.get(),
         candidate.data.stageData.staticData->runtimePlanningRootNodeId);
@@ -279,7 +281,7 @@ std::unique_ptr<PlannerInterface> attemptToUsePlan(
                       incrementReplannedPlanIsCachedPlanCounterCb);
     }
 
-    if (candidate.exitedEarly) {
+    if (candidate.stopCondition == MultiPlannerStopCondition::kExhaustedBudget) {
         // The trial period took more than 'maxReadsBeforeReplan' physical reads. This plan may not
         // be efficient any longer, so we replan from scratch.
         auto numReads =

@@ -13,6 +13,7 @@ namespace mongo {
 class DiskMetrics;
 class ObservableMutexMetrics;
 class SystemMountMetrics;
+class WiredTigerMetricRegistry;
 
 // Forward declarations needed for MetricName to declare Passkey friends.
 namespace disagg {
@@ -77,6 +78,9 @@ public:
         friend ::mongo::DiskMetrics;
         friend ::mongo::ObservableMutexMetrics;
         friend ::mongo::SystemMountMetrics;
+        // TODO (SERVER-136509): rename WiredTigerMetricRegistry to WiredTigerMetrics and remove the
+        // current WiredTigerMetrics
+        friend ::mongo::WiredTigerMetricRegistry;
         // This allows us to create dynamic metric names in tests
         friend ::mongo::otel::metrics::DynamicMetricNameTestPasskeyMaker;
         constexpr Passkey() = default;
@@ -99,6 +103,12 @@ public:
 class MetricNames {
 public:
     // Networking & Observability Team Metrics
+    static constexpr MetricName kReplicationPrimaryTcpCongestionWindowSize =
+        MetricNameMaker::make("mongodb.network.repl.source.tcp_congestion_window_size");
+    static constexpr MetricName kReplicationPrimarySendQueueSize =
+        MetricNameMaker::make("mongodb.network.repl.source.send_queue_size");
+    static constexpr MetricName kReplicationPrimarySendQueueBytes =
+        MetricNameMaker::make("mongodb.network.repl.source.send_queue");
     static constexpr MetricName kReplicationPrimaryPeerEstablishedTime =
         MetricNameMaker::make("mongodb.network.repl.source.connection_established_time");
     static constexpr MetricName kReplicationPrimaryLogicalBytesOut =
@@ -109,8 +119,8 @@ public:
         MetricNameMaker::make("mongodb.network.repl.secondary.receive_queue");
     static constexpr MetricName kReplicationSecondaryReceiveQueueSize =
         MetricNameMaker::make("mongodb.network.repl.secondary.receive_queue_size");
-    static constexpr MetricName kReplicationSecondaryCollectErrors =
-        MetricNameMaker::make("mongodb.network.repl.secondary.collect_errors");
+    static constexpr MetricName kReplicationCollectErrors =
+        MetricNameMaker::make("mongodb.network.repl.collect_errors");
     static constexpr MetricName kReplicationSecondaryTcpCongestionWindowSize =
         MetricNameMaker::make("mongodb.network.repl.secondary.tcp_congestion_window_size");
     static constexpr MetricName kReplicationSecondaryLogicalBytesIn =
@@ -686,6 +696,8 @@ public:
         MetricNameMaker::make("mongodb.serverStatus.indexBuilds.total");
     static constexpr MetricName kIndexBuildPhasesCommit =
         MetricNameMaker::make("mongodb.serverStatus.indexBuilds.phases.commit");
+    static constexpr MetricName kIndexBuildsLastCommittedMillis = MetricNameMaker::make(
+        "mongodb.serverStatus.metrics.indexBuilds.phases.lastCommittedMillis");
 
     static constexpr MetricName kIndexBulkBuilderNumSorted =
         MetricNameMaker::make("mongodb.serverStatus.indexBulkBuilder.numSorted");

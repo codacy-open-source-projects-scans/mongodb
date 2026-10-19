@@ -20,9 +20,10 @@ import {assertPlanCosted, assertPlanNotCosted} from "jstests/libs/query/cbr_util
 import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
 import {Stage} from "jstests/noPassthroughWithMongod/query/cbr/cbr_expect_helpers.js";
 
-// TODO SERVER-92589: Remove this exemption
+// SBE explain does not report CBR estimates for the winning plan, which this test asserts on.
+// TODO SERVER-130179: Remove this early exit once SBE explain reports these estimates.
 if (checkSbeFullyEnabled(db)) {
-    jsTestLog(`Skipping ${jsTestName()} as SBE executor is not supported yet`);
+    jsTestLog(`Skipping ${jsTestName()}: SBE explain lacks CBR estimates for the winning plan`);
     quit();
 }
 
@@ -353,6 +354,16 @@ function testLargeInList() {
         db.adminCommand({setParameter: 1, internalQueryCBRCEMode: "samplingCE"}),
     );
 
+    // Sample by strides rather than by chunk. The documents above are inserted in 'a' order, so a
+    // chunk sample is a handful of contiguous 'a' ranges: when none of them falls in the queried
+    // range the sample observes no matching document, the scan is estimated at zero, and CBR
+    // abandons ranking and leaves the plans uncosted. A stride sample is spread over the whole
+    // collection, so it observes matches for any predicate that matches a reasonable fraction of
+    // it, whichever part of the 'a' range that predicate selects.
+    const prevStrideSampling = assert.commandWorked(
+        db.adminCommand({setParameter: 1, internalQuerySamplingByStrides: true}),
+    );
+
     // CBR uses a CE cache for $in-lists with <= 1000 intervals; larger lists bypass the cache.
     // In both cases, CBR should cost and rank the plans.
     const cacheableIn = Array.from({length: 1000}, (_, i) => i);
@@ -371,9 +382,15 @@ function testLargeInList() {
     // $in-list with > 1000 elements: CBR estimates it without the CE cache.
     testQuery({a: {$in: nonCacheableIn}, b: {$lt: 50}});
 
-    // Restore CE mode for the remaining tests.
+    // Restore CE mode and sampling technique for the remaining tests.
     assert.commandWorked(
         db.adminCommand({setParameter: 1, internalQueryCBRCEMode: prevCEMode.was}),
+    );
+    assert.commandWorked(
+        db.adminCommand({
+            setParameter: 1,
+            internalQuerySamplingByStrides: prevStrideSampling.was,
+        }),
     );
     assert.commandWorked(coll.dropIndexes());
 }

@@ -47,7 +47,7 @@ server_parameters:
     internalQueryMaxWriteToCurOpMemoryUsageBytes:
         mod_visibility: needs_replacement
         description: >-
-            Maximum amount of memory bytes tracked by a stage's memory tracker before writing to CurOp.
+            Chunk size, in bytes, governing when a memory usage tracker writes to CurOp.
         set_at: [startup, runtime]
         cpp_varname: "internalQueryMaxWriteToCurOpMemoryUsageBytes"
         cpp_vartype: Atomic<int>
@@ -1034,6 +1034,19 @@ server_parameters:
                 pqs_settable: true
                 fcv:
                     min: "9.0"
+
+    internalEnablePathArraynessTraverseFElision:
+        description: >-
+            Whether or not to elide traverseF in SBE filters for paths that PathArrayness marks
+            as never being arrays. Requires internalEnablePathArrayness.
+        set_at: [startup, runtime]
+        cpp_varname: "internalEnablePathArraynessTraverseFElision"
+        cpp_vartype: Atomic<bool>
+        default: true
+        redact: false
+        annotations:
+            query_knob:
+                wire_name: enablePathArraynessTraverseFElision
 
     internalQuerySpillingMaxWaitTimeout:
         description: >-

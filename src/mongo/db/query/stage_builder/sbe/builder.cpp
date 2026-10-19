@@ -120,7 +120,7 @@ void prepareSearchQueryParameters(PlanStageData* data, const CanonicalQuery& cq)
         env->resetSlot(env->getSlot("searchLimit"sv),
                        sbe::value::TypeTags::NumberInt64,
                        *sn->limit,
-                       true /* owned */);
+                       /*owned=*/true);
     }
 
     if (sn->sortSpec) {
@@ -128,7 +128,7 @@ void prepareSearchQueryParameters(PlanStageData* data, const CanonicalQuery& cq)
         env->resetSlot(env->getSlot("searchSortSpec"sv),
                        sbe::value::TypeTags::sortSpec,
                        sbe::value::bitcastFrom<sbe::SortSpec*>(sortSpec.release()),
-                       true /* owned */);
+                       /*owned=*/true);
     }
 
     if (auto remoteVars = sn->remoteCursorVars) {
@@ -137,12 +137,12 @@ void prepareSearchQueryParameters(PlanStageData* data, const CanonicalQuery& cq)
         auto varsObj = remoteVars->getField(name);
         if (varsObj.ok()) {
             auto [tag, val] = sbe::bson::convertToOwned(varsObj).releaseToRaw();
-            env->resetSlot(env->getSlot(name), tag, val, true /* owned */);
+            env->resetSlot(env->getSlot(name), tag, val, /*owned=*/true);
             // Both the SBE and the classic portions of the query can reference the same value,
             // and this is the only place to set the value if using SBE so we don't worry about
             // inconsistency.
             cq.getExpCtx()->variables.setReservedValue(
-                Variables::kSearchMetaId, mongo::Value(varsObj), true /* isConstant */);
+                Variables::kSearchMetaId, mongo::Value(varsObj), /*isConstant=*/true);
             if (varsObj.type() == BSONType::object) {
                 auto metaValObj = varsObj.embeddedObject();
                 if (metaValObj.hasField("count")) {
@@ -321,7 +321,7 @@ std::pair<SbStage, PlanStageData> buildSearchMetadataExecutorSBE(OperationContex
                                                            data->resultSlot,
                                                            remoteCursorId,
                                                            yieldPolicy,
-                                                           PlanNodeId{} /* planNodeId */);
+                                                           /*planNodeId=*/PlanNodeId{});
 
     env.ctx.remoteCursors = remoteCursors;
     stage->attachToOperationContext(opCtx);
@@ -1150,7 +1150,7 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildCountScan(
                               csn->endKeyInclusive,
                               indexAccessMethod->getSortedDataInterface()->getKeyStringVersion(),
                               indexAccessMethod->getSortedDataInterface()->getOrdering(),
-                              true /* forward */);
+                              /*forward=*/true);
         isPointInterval = lowKey == highKey;
     } else {
         isPointInterval = ietsArePointInterval(csn->iets);
@@ -1164,7 +1164,7 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildCountScan(
                                                 collection,
                                                 indexName,
                                                 indexDescriptor->keyPattern(),
-                                                true /* forward */,
+                                                /*forward=*/true,
                                                 std::move(lowKey),
                                                 std::move(highKey),
                                                 ixScanReqs,
@@ -1328,8 +1328,9 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildFetch(const Query
                            fn->filter.get(),
                            resultSlot,
                            outputs,
-                           /*isFilterOverIxscan*/ false,
-                           /*canUsePathArrayness*/
+                           /*isFilterOverIxscan=*/false,
+
+                           /*canUsePathArrayness=*/
                            _state.expCtx->getQueryKnobConfiguration().getEnablePathArrayness());
         if (!filterExpr.isNull()) {
             stage = b.makeFilter(std::move(stage), std::move(filterExpr));
@@ -2053,7 +2054,7 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildOnlyUnwind(
     // 'unwindSlot' and place the array index value into 'arrayIndexSlot'.
     //
     auto [unwindStage, unwindSlot, arrayIndexSlot] =
-        b.makeUnwind(std::move(stage), getFieldSlot /* inField */, un.preserveNullAndEmptyArrays);
+        b.makeUnwind(std::move(stage), /*inputSlot=*/getFieldSlot, un.preserveNullAndEmptyArrays);
     stage = std::move(unwindStage);
 
     //
@@ -3569,243 +3570,6 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildShardFilter(
     return {std::move(stage), std::move(outputs)};
 }
 
-std::pair<SbStage, PlanStageSlots> buildSearchMeta(const SearchNode* root,
-                                                   StageBuilderState& state,
-                                                   const CanonicalQuery& cq,
-                                                   sbe::value::SlotIdGenerator* slotIdGenerator,
-                                                   Environment& env,
-                                                   PlanYieldPolicySBE* const yieldPolicy) {
-    SbBuilder b(state, root->nodeId());
-
-    auto expCtx = cq.getExpCtxRaw();
-    PlanStageSlots outputs;
-
-    if (!expCtx->getNeedsMerge()) {
-        auto searchMetaSlot = SbSlot{*state.getBuiltinVarSlot(Variables::kSearchMetaId)};
-        auto stage = b.makeConstFilter(b.makeLimitOneCoScanTree(),
-                                       b.makeFunction(sbe::EFn::kExists, searchMetaSlot));
-        outputs.setResultObj(searchMetaSlot);
-        return {std::move(stage), std::move(outputs)};
-    }
-
-    auto searchResultSlot = SbSlot{slotIdGenerator->generate()};
-
-    auto stage = sbe::SearchCursorStage::createForMetadata(expCtx->getNamespaceString(),
-                                                           expCtx->getUUID(),
-                                                           searchResultSlot.getId(),
-                                                           root->remoteCursorId,
-                                                           yieldPolicy,
-                                                           root->nodeId());
-    outputs.setResultObj(searchResultSlot);
-    state.data->cursorType = CursorTypeEnum::SearchMetaResult;
-
-    return {std::move(stage), std::move(outputs)};
-}
-
-std::pair<std::vector<std::string>, sbe::value::SlotVector>
-SlotBasedStageBuilder::buildSearchMetadataSlots() {
-    std::vector<std::string> metadataNames;
-    sbe::value::SlotVector metadataSlots;
-
-    // If Search in SBE is used, we should only build these metadata slots if the metadata type is
-    // requested by the pipeline. However, since Search in SBE is currently not in use, SERVER-99589
-    // changed it to always build these slots, for simplicity of a refactor.
-    metadataNames.push_back(std::string{Document::metaFieldSearchScore});
-    metadataSlots.push_back(_slotIdGenerator.generate());
-    _data->metadataSlots.searchScoreSlot = metadataSlots.back();
-
-    metadataNames.push_back(std::string{Document::metaFieldSearchHighlights});
-    metadataSlots.push_back(_slotIdGenerator.generate());
-    _data->metadataSlots.searchHighlightsSlot = metadataSlots.back();
-
-    metadataNames.push_back(std::string{Document::metaFieldSearchScoreDetails});
-    metadataSlots.push_back(_slotIdGenerator.generate());
-    _data->metadataSlots.searchDetailsSlot = metadataSlots.back();
-
-    metadataNames.push_back(std::string{Document::metaFieldSearchSortValues});
-    metadataSlots.push_back(_slotIdGenerator.generate());
-    _data->metadataSlots.searchSortValuesSlot = metadataSlots.back();
-
-    metadataNames.push_back(std::string{Document::metaFieldSearchSequenceToken});
-    metadataSlots.push_back(_slotIdGenerator.generate());
-    _data->metadataSlots.searchSequenceToken = metadataSlots.back();
-
-    return {metadataNames, metadataSlots};
-}
-
-std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::buildSearch(const QuerySolutionNode* root,
-                                                                      const PlanStageReqs& reqs) {
-    SbBuilder b(_state, root->nodeId());
-
-    auto sn = static_cast<const SearchNode*>(root);
-    if (sn->isSearchMeta) {
-        return buildSearchMeta(sn, _state, _cq, &_slotIdGenerator, _env, _yieldPolicy);
-    }
-
-    const auto& collection = getCollection(sn->nss);
-    auto expCtx = _cq.getExpCtxRaw();
-
-    // Register search query parameter slots.
-    auto limitSlot = _env->registerSlot("searchLimit"sv,
-                                        sbe::value::TypeTags::Nothing,
-                                        0 /* val */,
-                                        false /* owned */,
-                                        &_slotIdGenerator);
-
-    auto sortSpecSlot = _env->registerSlot(
-        "searchSortSpec"sv, sbe::value::TypeTags::Nothing, 0 /* val */, false, &_slotIdGenerator);
-
-    bool isStoredSource = sn->searchQuery.getBoolField(mongot_cursor::kReturnStoredSourceArg);
-
-    auto topLevelFields = getTopLevelFields(reqs.getFields());
-
-    PlanStageSlots outputs;
-
-    // Search cursor stage output slots
-    auto searchResultSlot = isStoredSource && reqs.hasResult()
-        ? boost::make_optional(SbSlot{_slotIdGenerator.generate()})
-        : boost::none;
-    // Register the $$SEARCH_META slot.
-    _state.getBuiltinVarSlot(Variables::kSearchMetaId);
-
-    auto [metadataNames, metadataSlots] = buildSearchMetadataSlots();
-
-    _data->metadataSlots.sortKeySlot = _slotIdGenerator.generate();
-
-    auto collatorSlot = _state.getCollatorSlot();
-
-    if (isStoredSource) {
-        if (searchResultSlot) {
-            outputs.setResultObj(*searchResultSlot);
-        }
-
-        SbSlotVector topLevelFieldSlots;
-        topLevelFieldSlots.reserve(topLevelFields.size());
-
-        for (size_t i = 0; i < topLevelFields.size(); ++i) {
-            topLevelFieldSlots.emplace_back(_slotIdGenerator.generate());
-        }
-
-        auto stage = sbe::SearchCursorStage::createForStoredSource(expCtx->getNamespaceString(),
-                                                                   expCtx->getUUID(),
-                                                                   searchResultSlot->getId(),
-                                                                   metadataNames,
-                                                                   metadataSlots,
-                                                                   topLevelFields,
-                                                                   b.lower(topLevelFieldSlots),
-                                                                   sn->remoteCursorId,
-                                                                   sortSpecSlot,
-                                                                   limitSlot,
-                                                                   _data->metadataSlots.sortKeySlot,
-                                                                   collatorSlot,
-                                                                   _yieldPolicy,
-                                                                   sn->nodeId());
-
-        for (size_t i = 0; i < topLevelFields.size(); ++i) {
-            outputs.set(std::make_pair(PlanStageSlots::kField, topLevelFields[i]),
-                        topLevelFieldSlots[i]);
-        }
-
-        return {std::move(stage), std::move(outputs)};
-    }
-
-    auto idSlot = SbSlot{_slotIdGenerator.generate()};
-    auto searchCursorStage =
-        sbe::SearchCursorStage::createForNonStoredSource(expCtx->getNamespaceString(),
-                                                         expCtx->getUUID(),
-                                                         idSlot.getId(),
-                                                         metadataNames,
-                                                         metadataSlots,
-                                                         sn->remoteCursorId,
-                                                         sortSpecSlot,
-                                                         limitSlot,
-                                                         _data->metadataSlots.sortKeySlot,
-                                                         collatorSlot,
-                                                         _yieldPolicy,
-                                                         sn->nodeId());
-
-    // Make a project stage to convert '_id' field value into keystring.
-    auto catalog = collection->getIndexCatalog();
-    auto indexEntry = catalog->findIndexByName(_state.opCtx, kIdIndexName);
-    auto indexDescriptor = indexEntry->descriptor();
-    auto indexAccessMethod = indexEntry->accessMethod()->asSortedData();
-    auto sortedData = indexAccessMethod->getSortedDataInterface();
-    auto version = sortedData->getKeyStringVersion();
-    auto ordering = sortedData->getOrdering();
-
-    auto makeNewKeyFunc = [&](key_string::Discriminator discriminator) {
-        sbe::EFn functionName = collatorSlot ? sbe::EFn::kCollKs : sbe::EFn::kKs;
-        SbExpr::Vector args;
-        args.emplace_back(b.makeInt64Constant(static_cast<int64_t>(version)));
-        args.emplace_back(b.makeInt32Constant(ordering.getBits()));
-        args.emplace_back(idSlot);
-        args.emplace_back(b.makeInt64Constant(static_cast<int64_t>(discriminator)));
-        if (collatorSlot) {
-            args.emplace_back(SbSlot{*collatorSlot});
-        }
-        return b.makeFunction(functionName, std::move(args));
-    };
-
-    PlanStageReqs ixScanReqs;
-    ixScanReqs.set(kRecordId)
-        .set(kSnapshotId)
-        .set(kIndexIdent)
-        .set(kIndexKey)
-        .set(kIndexKeyPattern);
-
-    auto [idxScanStage, idxOutputs] =
-        generateSingleIntervalIndexScan(_state,
-                                        collection,
-                                        std::string{kIdIndexName},
-                                        indexDescriptor->keyPattern(),
-                                        true /* forward */,
-                                        makeNewKeyFunc(key_string::Discriminator::kExclusiveBefore),
-                                        makeNewKeyFunc(key_string::Discriminator::kExclusiveAfter),
-                                        ixScanReqs,
-                                        sn->nodeId());
-
-    // Join the idx scan stage with fetch stage.
-    auto [outStage, outputDocSlot, _, topLevelFieldSlots] =
-        makeLoopJoinForFetch(std::move(idxScanStage),
-                             topLevelFields,
-                             idxOutputs.get(kRecordId),
-                             idxOutputs.get(kSnapshotId),
-                             idxOutputs.get(kIndexIdent),
-                             idxOutputs.get(kIndexKey),
-                             idxOutputs.get(kIndexKeyPattern),
-                             boost::none /* prefetchedResultSlot */,
-                             collection,
-                             _state,
-                             sn->nodeId(),
-                             SbSlotVector{} /* slotsToForward */);
-    auto fetchStage = std::move(outStage);
-
-    // Slot stores the resulting document.
-    outputs.setResultObj(outputDocSlot);
-
-    for (size_t i = 0; i < topLevelFields.size(); ++i) {
-        outputs.set(std::make_pair(PlanStageSlots::kField, topLevelFields[i]),
-                    topLevelFieldSlots[i]);
-    }
-
-    // Join the search_cursor+project stage with idx_scan+fetch stage.
-    SbSlotVector outerProjVec;
-    SbSlotVector outerCorrelated;
-
-    for (const auto slotId : metadataSlots) {
-        outerProjVec.emplace_back(SbSlot{slotId});
-    }
-    outerProjVec.push_back(SbSlot{*_data->metadataSlots.sortKeySlot});
-    outerCorrelated.emplace_back(idSlot);
-
-    auto stage = b.makeLoopJoin(std::move(searchCursorStage),
-                                b.makeLimit(std::move(fetchStage), b.makeInt64Constant(1)),
-                                std::move(outerProjVec),
-                                std::move(outerCorrelated));
-
-    return {std::move(stage), std::move(outputs)};
-}
-
 std::pair<SbStage, bool> SlotBasedStageBuilder::buildVectorizedFilterExpr(
     SbStage stage,
     const PlanStageReqs& reqs,
@@ -3934,7 +3698,6 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::build(const QuerySolut
         {STAGE_EQ_LOOKUP, &SlotBasedStageBuilder::buildEqLookup},
         {STAGE_EQ_LOOKUP_UNWIND, &SlotBasedStageBuilder::buildEqLookup},
         {STAGE_SHARDING_FILTER, &SlotBasedStageBuilder::buildShardFilter},
-        {STAGE_SEARCH, &SlotBasedStageBuilder::buildSearch},
         {STAGE_UNPACK_TS_BUCKET, &SlotBasedStageBuilder::buildUnpackTsBucket},
         {STAGE_NESTED_LOOP_JOIN_EMBEDDING_NODE,
          &SlotBasedStageBuilder::buildNestedLoopJoinEmbeddingNode},
@@ -4073,7 +3836,7 @@ std::pair<SbStage, PlanStageSlots> SlotBasedStageBuilder::build(const QuerySolut
         _data->metadataSlots.reset();
     }
 
-    outputs.clearNonRequiredSlots(reqsIn, false /*saveResultObj*/);
+    outputs.clearNonRequiredSlots(reqsIn, /*saveResultObj=*/false);
 
     return {std::move(stage), std::move(outputs)};
 }

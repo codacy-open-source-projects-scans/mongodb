@@ -36,9 +36,10 @@ import {TwoFieldDataset} from "jstests/noPassthroughWithMongod/query/cbr/lib/dat
 import {NumberDataset} from "jstests/noPassthroughWithMongod/query/cbr/lib/datasets/number.js";
 import {StringDataset} from "jstests/noPassthroughWithMongod/query/cbr/lib/datasets/string.js";
 
-// TODO SERVER-92589: Remove this exemption
+// SBE explain does not report CBR estimates for the winning plan, which this test asserts on.
+// TODO SERVER-130179: Remove this early exit once SBE explain reports these estimates.
 if (checkSbeFullyEnabled(db)) {
-    jsTestLog(`Skipping ${jsTestName()} as SBE executor is not supported yet`);
+    jsTestLog(`Skipping ${jsTestName()}: SBE explain lacks CBR estimates for the winning plan`);
     quit();
 }
 
@@ -76,7 +77,18 @@ function runOneTest({dataset, indexes, analyze, numberBuckets = 1000}) {
             const explain = cursor.explain();
             const plans = getAllPlans(explain);
             for (const plan of plans) {
-                assert(plan.hasOwnProperty("cardinalityEstimate"));
+                if (!plan.hasOwnProperty("cardinalityEstimate")) {
+                    // CBR abandons estimation for the whole query when a scan node estimates to
+                    // zero, handing all candidates to the multi-planner and reporting no estimates
+                    // in explain. That may only happen when the predicate truly matches nothing.
+                    assert.eq(
+                        0,
+                        actualDocuments,
+                        "plan has no cardinality estimate but the predicate matches documents",
+                        {predicate, plan},
+                    );
+                    continue;
+                }
                 const cardinalityEstimate = plan.cardinalityEstimate;
 
                 // 'Histogram', 'Code' and 'Metadata' all imply a confident estimate,

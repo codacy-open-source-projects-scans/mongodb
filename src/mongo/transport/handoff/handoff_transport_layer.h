@@ -127,12 +127,12 @@ public:
 
     bool isEgress() const override;
 
-    std::optional<std::vector<SessionStats>> collectReplicationSessionStats() override;
+    SessionStatsResult collectReplicationSessionStats() override;
     void registerReplicationSession(std::shared_ptr<Session>) override;
 #ifdef MONGO_CONFIG_SSL
     /** unimplemented: returns an error */
     Status rotateCertificates(std::shared_ptr<SSLManagerInterface>,
-                              bool /*asyncOCSPStaple*/) override;
+                              /*asyncOCSPStaple=*/bool) override;
 
     /** unimplemented: returns an error */
     StatusWith<std::shared_ptr<const SSLConnectionContext>> createTransientSSLContext(

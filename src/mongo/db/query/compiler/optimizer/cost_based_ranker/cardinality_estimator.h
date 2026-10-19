@@ -52,7 +52,8 @@ public:
     CardinalityEstimator(const CollectionInfo& collInfo,
                          const ce::SamplingEstimator* samplingEstimator,
                          EstimateMap& qsnEstimates,
-                         QueryCBRCEModeEnum rankerMode);
+                         QueryCBRCEModeEnum rankerMode,
+                         bool considerZeroCESampledIXScanNonEstimable = true);
 
     // Delete the copy and move constructors and assignment operator
     CardinalityEstimator(const CardinalityEstimator&) = delete;
@@ -252,6 +253,10 @@ protected:
 
     // The cardinality estimate mode we are using for estimates.
     const QueryCBRCEModeEnum _ceMode;
+
+    // Whether, under sampling CE, a plan with an index scan estimated to scan zero keys is
+    // non-estimable, reported with ErrorCodes::ZeroCEEstimate.
+    const bool _considerZeroCESampledIXScanNonEstimable;
 
     // Set with the paths we know are multikey which is deduced from the catalog. Note that a field
     // may be multikey but not reflected in this set because there may not be an index over the

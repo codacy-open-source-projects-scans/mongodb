@@ -23,6 +23,7 @@
 #include "mongo/db/pipeline/aggregate_command_gen.h"
 #include "mongo/db/query/query_settings/query_settings_service.h"
 #include "mongo/db/repl/change_stream_oplog_notification.h"
+#include "mongo/db/replicated_fast_count/replicated_fast_count_enabled.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_init.h"
 #include "mongo/db/replicated_fast_count/replicated_fast_count_manager.h"
 #include "mongo/db/rss/replicated_storage_service.h"
@@ -444,7 +445,7 @@ private:
                                            FCV originalVersion,
                                            FCV requestedVersion) final {
         // This also runs in the dry run (including the dry run forwarded to shards).
-        _uassertReplicaSetWritesNotBlocked(opCtx, true /* isUpgrade */);
+        _uassertReplicaSetWritesNotBlocked(opCtx, /*isUpgrade=*/true);
     }
 
     void userCollectionsWorkForUpgrade(OperationContext* opCtx,
@@ -493,7 +494,8 @@ private:
         // shard starts at lastLTS FCV and is upgraded by the config server during addShard.
         if (gFeatureFlagReplicatedFastCount.isEnabledOnTargetFCVButDisabledOnOriginalFCV(
                 requestedVersion, originalVersion) &&
-            repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet()) {
+            repl::ReplicationCoordinator::get(opCtx)->getSettings().isReplSet() &&
+            !isReplicatedFastCountDisabledForTest(opCtx)) {
             setUpReplicatedFastCount(opCtx);
         }
     }
@@ -570,7 +572,7 @@ private:
         if (gFeatureFlagCreateViewlessTimeseriesCollections.isEnabledOnVersion(requestedVersion)) {
             if (isConfigsvr) {
                 timeseries::upgradeDowngradeViewlessTimeseriesInShardedCluster(opCtx,
-                                                                               true /*isUpgrade*/);
+                                                                               /*isUpgrade=*/true);
             } else if (!role) {
                 timeseries::upgradeAllTimeseriesToViewless(opCtx);
             }
@@ -854,7 +856,7 @@ private:
                                              FCV originalVersion,
                                              FCV requestedVersion) final {
         // This also runs in the dry run (including the dry run forwarded to shards).
-        _uassertReplicaSetWritesNotBlocked(opCtx, false /* isUpgrade */);
+        _uassertReplicaSetWritesNotBlocked(opCtx, /*isUpgrade=*/false);
 
         bool errorAndLogValidationDisabled =
             (gFeatureFlagErrorAndLogValidationAction.isDisabledOnTargetFCVButEnabledOnOriginalFCV(
@@ -1082,7 +1084,7 @@ private:
         if (!gFeatureFlagCreateViewlessTimeseriesCollections.isEnabledOnVersion(requestedVersion)) {
             if (role && role->has(ClusterRole::ConfigServer)) {
                 timeseries::upgradeDowngradeViewlessTimeseriesInShardedCluster(opCtx,
-                                                                               false /*isUpgrade*/);
+                                                                               /*isUpgrade=*/false);
             } else if (!role) {
                 timeseries::downgradeAllTimeseriesFromViewless(opCtx);
             }
@@ -1153,7 +1155,7 @@ private:
             if (sp->isEnabledOnVersion(parameterState, originalVersion) &&
                 !sp->isEnabledOnVersion(parameterState, requestedVersion)) {
                 deletes.emplace_back(
-                    write_ops::DeleteOpEntry(BSON("_id" << name), false /*multi*/));
+                    write_ops::DeleteOpEntry(BSON("_id" << name), /*multi=*/false));
             }
         }
         if (deletes.size() > 0) {

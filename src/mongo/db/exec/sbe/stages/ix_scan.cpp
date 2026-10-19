@@ -599,8 +599,8 @@ void SimpleIndexScanStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
 
     if (debugPrintInfo.printBytecode) {
         DebugPrinter::addNewLine(ret);
-        PlanStage::debugPrintBytecode(ret, _seekKeyLowCode, "SEEK_KEY_LOW" /*title*/);
-        PlanStage::debugPrintBytecode(ret, _seekKeyHighCode, "SEEK_KEY_HIGH" /*title*/);
+        PlanStage::debugPrintBytecode(ret, _seekKeyLowCode, /*title=*/"SEEK_KEY_LOW");
+        PlanStage::debugPrintBytecode(ret, _seekKeyHighCode, /*title=*/"SEEK_KEY_HIGH");
     }
 }
 
@@ -702,7 +702,7 @@ void GenericIndexScanStage::doDebugPrint(std::vector<DebugPrinter::Block>& ret,
 
     if (debugPrintInfo.printBytecode) {
         DebugPrinter::addNewLine(ret);
-        PlanStage::debugPrintBytecode(ret, _indexBoundsCode, "INDEX_BOUNDS" /*title*/);
+        PlanStage::debugPrintBytecode(ret, _indexBoundsCode, /*title=*/"INDEX_BOUNDS");
     }
 }
 
@@ -749,15 +749,15 @@ bool GenericIndexScanStage::validateKey(const SortedDataKeyValueView& key) {
 
         switch (_checker->checkKeyWithEndPosition(
             bsonKey, &_seekPoint, _endKey, _params.ord, _forward)) {
-            case IndexBoundsChecker::VALID:
+            case KeyState::VALID:
                 _scanState = ScanState::kScanning;
                 return true;
 
-            case IndexBoundsChecker::DONE:
+            case KeyState::DONE:
                 _scanState = ScanState::kFinished;
                 return false;
 
-            case IndexBoundsChecker::MUST_ADVANCE:
+            case KeyState::MUST_ADVANCE:
                 _scanState = ScanState::kNeedSeek;
                 return false;
         }

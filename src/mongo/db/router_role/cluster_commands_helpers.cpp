@@ -349,52 +349,73 @@ std::vector<AsyncRequestsSender::Response> gatherResponsesImpl(
     // Get the responses.
     std::vector<AsyncRequestsSender::Response> responses;  // Stores results by ShardId
 
+    // Inside a transaction, a bail-out below must not abandon sibling responses still in flight: a
+    // response's participant metadata is only enrolled when next() validates it. Capture the first
+    // failure, stop retrying (the error surfaces regardless, so retries would only delay it),
+    // drain the remaining responses, then surface the first failure. Outside a transaction there
+    // is no metadata to enroll, so a bail-out surfaces immediately.
+    const bool drainOnBailOut = static_cast<bool>(TransactionRouter::get(opCtx));
+    auto firstError = Status::OK();
+
     while (!ars.done()) {
-        auto response = ars.next();
+        try {
+            auto response = ars.next();
 
-        auto status = response.swResponse.getStatus();
-        if (status.isOK()) {
-            // We successfully received a response.
+            auto status = response.swResponse.getStatus();
+            if (status.isOK()) {
+                // We successfully received a response.
 
-            // Check for special errors that require throwing out any accumulated results.
-            auto& responseObj = response.swResponse.getValue().data;
-            status = getStatusFromCommandResult(responseObj);
+                // Check for special errors that require throwing out any accumulated results.
+                auto& responseObj = response.swResponse.getValue().data;
+                status = getStatusFromCommandResult(responseObj);
 
-            // If we specify to throw on stale shard version errors, then we will early exit
-            // from examining results. Otherwise, we will allow stale shard version errors to
-            // accumulate in the list of results.
-            if (throwOnStaleShardVersionErrors &&
-                ErrorCodes::isStaleShardVersionError(status.code())) {
-                uassertStatusOK(status.withContext(str::stream()
-                                                   << "got stale shardVersion response from shard "
-                                                   << response.shardId << " at host "
-                                                   << response.shardHostAndPort->toString()));
+                // If we specify to throw on stale shard version errors, then we will early exit
+                // from examining results. Otherwise, we will allow stale shard version errors to
+                // accumulate in the list of results.
+                if (throwOnStaleShardVersionErrors &&
+                    ErrorCodes::isStaleShardVersionError(status.code())) {
+                    uassertStatusOK(status.withContext(
+                        str::stream()
+                        << "got stale shardVersion response from shard " << response.shardId
+                        << " at host " << response.shardHostAndPort->toString()));
+                }
+                if (ErrorCodes::StaleDbVersion == status) {
+                    uassertStatusOK(status.withContext(
+                        str::stream()
+                        << "got stale databaseVersion response from shard " << response.shardId
+                        << " at host " << response.shardHostAndPort->toString()));
+                }
+                if (ErrorCodes::CannotImplicitlyCreateCollection == status) {
+                    uassertStatusOK(status.withContext(
+                        str::stream() << "got cannotImplicitlyCreateCollection response from shard "
+                                      << response.shardId << " at host "
+                                      << response.shardHostAndPort->toString()));
+                }
+
+                // In the case a read is performed against a view, the server can return an error
+                // indicating that the underlying collection may be sharded. When this occurs the
+                // return message will include an expanded view definition and collection
+                // namespace. We pass the definition back to the caller by throwing the error. This
+                // allows the caller to rewrite the request as an aggregation and retry it.
+                if (ErrorCodes::CommandOnShardedViewNotSupportedOnMongod == status) {
+                    uassertStatusOK(status);
+                }
             }
-            if (ErrorCodes::StaleDbVersion == status) {
-                uassertStatusOK(status.withContext(
-                    str::stream() << "got stale databaseVersion response from shard "
-                                  << response.shardId << " at host "
-                                  << response.shardHostAndPort->toString()));
+            responses.push_back(std::move(response));
+        } catch (const DBException& ex) {
+            // Either a bail-out above or a metadata failure from next(), which drains the
+            // remaining responses itself before throwing. The first failure in time order wins.
+            if (!drainOnBailOut) {
+                throw;
             }
-            if (ErrorCodes::CannotImplicitlyCreateCollection == status) {
-                uassertStatusOK(status.withContext(
-                    str::stream() << "got cannotImplicitlyCreateCollection response from shard "
-                                  << response.shardId << " at host "
-                                  << response.shardHostAndPort->toString()));
-            }
-
-            // In the case a read is performed against a view, the server can return an error
-            // indicating that the underlying collection may be sharded. When this occurs the return
-            // message will include an expanded view definition and collection namespace. We pass
-            // the definition back to the caller by throwing the error. This allows the caller to
-            // rewrite the request as an aggregation and retry it.
-            if (ErrorCodes::CommandOnShardedViewNotSupportedOnMongod == status) {
-                uassertStatusOK(status);
+            if (firstError.isOK()) {
+                firstError = ex.toStatus();
+                ars.stopRetrying();
             }
         }
-        responses.push_back(std::move(response));
     }
 
+    uassertStatusOK(firstError);
     return responses;
 }
 
@@ -416,7 +437,7 @@ std::vector<AsyncRequestsSender::Response> gatherResponses(
         readPref,
         retryPolicy,
         requests,
-        true /* throwOnStaleShardVersionErrors */,
+        /*throwOnStaleShardVersionErrors=*/true,
         executor ? executor : Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
         routingCtx);
 }
@@ -546,7 +567,7 @@ std::vector<AsyncRequestsSender::Response> scatterGatherUnversionedTargetAllShar
                            readPref,
                            retryPolicy,
                            requests,
-                           nullptr /* routingCtx */,
+                           /*routingCtx=*/nullptr,
                            executor);
 }
 
@@ -586,7 +607,7 @@ std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRouting
                                                      nss,
                                                      routingCtx.getCollectionRoutingInfo(nss),
                                                      collation,
-                                                     boost::none /*explainVerbosity*/,
+                                                     /*verbosity=*/boost::none,
                                                      letParameters,
                                                      runtimeConstants);
     return scatterGatherVersionedTargetByRoutingTable(expCtx,
@@ -616,7 +637,7 @@ std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRouting
         buildVersionedRequestsForTargetedShards(expCtx,
                                                 nss,
                                                 routingCtx.getCollectionRoutingInfo(nss),
-                                                {} /* shardsToSkip */,
+                                                /*shardsToSkip=*/{},
                                                 cmdObj,
                                                 query,
                                                 collation,
@@ -653,7 +674,7 @@ std::vector<AsyncRequestsSender::Response> scatterGatherVersionedTargetByRouting
                                readPref,
                                retryPolicy,
                                requests,
-                               false /* throwOnStaleShardVersionErrors */,
+                               /*throwOnStaleShardVersionErrors=*/false,
                                Grid::get(opCtx)->getExecutorPool()->getArbitraryExecutor(),
                                &routingCtx);
 }
@@ -690,10 +711,10 @@ AsyncRequestsSender::Response executeCommandAgainstShardWithMinKeyChunk(
     auto expCtx = makeExpressionContextWithDefaultsForTargeter(opCtx,
                                                                nss,
                                                                cri,
-                                                               BSONObj() /*collation*/,
-                                                               boost::none /*explainVerbosity*/,
-                                                               boost::none /*letParameters*/,
-                                                               boost::none /*runtimeConstants*/);
+                                                               /*collation=*/BSONObj(),
+                                                               /*verbosity=*/boost::none,
+                                                               /*letParameters=*/boost::none,
+                                                               /*runtimeConstants=*/boost::none);
 
     const auto query = cri.isSharded()
         ? cri.getChunkManager().getShardKeyPattern().getKeyPattern().globalMin()
@@ -706,7 +727,7 @@ AsyncRequestsSender::Response executeCommandAgainstShardWithMinKeyChunk(
         readPref,
         retryPolicy,
         buildVersionedRequestsForTargetedShards(
-            expCtx, nss, cri, {} /* shardsToSkip */, cmdObj, query, BSONObj() /* collation */),
+            expCtx, nss, cri, /*shardsToSkip=*/{}, cmdObj, query, /*collation=*/BSONObj()),
         &routingCtx);
     return std::move(responses.front());
 }
@@ -734,7 +755,7 @@ RawResponsesResult appendRawResponses(
         // run inside transactions do not wait for write concern, except for commit and abort.
         if (TransactionRouter::get(opCtx) &&
             isTransientTransactionError(
-                status.code(), false /*hasWriteConcernError*/, false /*isCommitOrAbort*/)) {
+                status.code(), /*hasWriteConcernError=*/false, /*isCommitOrAbort=*/false)) {
             // Re-throw on transient transaction errors to make sure appropriate error labels are
             // appended to the result.
             uassertStatusOK(status);
@@ -887,11 +908,11 @@ std::vector<AsyncRequestsSender::Request> getVersionedRequestsForTargetedShards(
                                                                nss,
                                                                cri,
                                                                collation,
-                                                               boost::none /*explainVerbosity*/,
+                                                               /*verbosity=*/boost::none,
                                                                letParameters,
                                                                runtimeConstants);
     return buildVersionedRequestsForTargetedShards(
-        expCtx, nss, cri, {} /* shardsToSkip */, cmdObj, query, collation);
+        expCtx, nss, cri, /*shardsToSkip=*/{}, cmdObj, query, collation);
 }
 
 StatusWith<CollectionRoutingInfo> getCollectionRoutingInfoForTxnCmd_DEPRECATED(
@@ -958,7 +979,7 @@ CollectionRoutingInfo getRefreshedCollectionRoutingInfoAssertSharded_DEPRECATED(
     OperationContext* opCtx, const NamespaceString& nss) {
     const auto& catalogCache = Grid::get(opCtx)->catalogCache();
 
-    catalogCache->onStaleCollectionVersion(nss, boost::none /* wantedVersion */);
+    catalogCache->onStaleCollectionVersion(nss, /*wantedVersion=*/boost::none);
 
     auto cri = uassertStatusOK(catalogCache->getCollectionRoutingInfo(opCtx, nss));
 

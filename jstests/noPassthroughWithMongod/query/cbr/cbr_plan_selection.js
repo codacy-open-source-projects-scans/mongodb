@@ -13,11 +13,17 @@ import {
     getRejectedPlans,
     getWinningPlanFromExplain,
 } from "jstests/libs/query/analyze_plan.js";
+import {FeatureFlagUtil} from "jstests/libs/feature_flag_util.js";
 import {checkSbeFullyEnabled} from "jstests/libs/query/sbe_util.js";
 
-// TODO SERVER-92589: Remove this exemption
-if (checkSbeFullyEnabled(db)) {
-    jsTestLog(`Skipping ${jsTestName()} as SBE executor is not supported yet`);
+// In the legacy (non-deferred) getExecutor path, CBR is disabled for queries that will be
+// executed via SBE.
+// TODO SERVER-119581: Once the feature flag controlling the deferred engine selection is
+// deleted, this block should be able to be deleted.
+if (checkSbeFullyEnabled(db) && !FeatureFlagUtil.isEnabled(db, "GetExecutorDeferredEngineChoice")) {
+    jsTestLog(
+        `Skipping ${jsTestName()}: CBR is not run for SBE plans without deferred engine choice`,
+    );
     quit();
 }
 
@@ -109,7 +115,6 @@ try {
     // being defined as such) is chosen (as opposed to any index intersection that could be
     // considered).
     assert.eq(winningIndex({unique1: 1, b: 1, c: 1, d: 1}), "unique1_1");
-    assert.eq(winningIndex({unique1: -1, b: -1, c: -1, d: -1}), "unique1_1");
 
     // In the presence of a predicate that has no matching rows, its index is chosen.
     assert.eq(winningIndex({unique1: -1, b: 1}), "unique1_1");

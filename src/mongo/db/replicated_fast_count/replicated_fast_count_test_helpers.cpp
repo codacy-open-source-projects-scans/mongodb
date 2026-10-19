@@ -100,7 +100,7 @@ void checkUncommittedSizeCount(OperationContext* opCtx,
                                UUID uuid,
                                CollectionSizeCount expectedSizeCount) {
     const CollectionSizeCount uncommittedSizeAndCount =
-        UncommittedFastCountChanges::getForRead(opCtx).find(uuid);
+        UncommittedFastCountChanges::find(opCtx, uuid);
     EXPECT_EQ(uncommittedSizeAndCount, expectedSizeCount);
 }
 
@@ -579,7 +579,7 @@ CollectionSizeCount scanForAccurateSizeCount(OperationContext* opCtx, const Name
                                      AcquisitionPrerequisites::kRead),
         MODE_IS);
 
-    auto cursor = collAcq.getCollectionPtr()->getCursor(opCtx, /*forward*/ true);
+    auto cursor = collAcq.getCollectionPtr()->getCursor(opCtx, /*forward=*/true);
 
     CollectionSizeCount sizeCount;
     for (auto record = cursor->next(); record; record = cursor->next()) {
@@ -761,14 +761,15 @@ void writeToOplog(OperationContext* opCtx, const repl::OplogEntry& oplogEntry) {
     wuow.commit();
 }
 
-void insertSizeCountEntry(OperationContext* opCtx,
-                          SizeCountStore& store,
-                          UUID uuid,
-                          const SizeCountStore::Entry& entry) {
+boost::optional<SizeCountStore::Entry> insertSizeCountEntry(OperationContext* opCtx,
+                                                            SizeCountStore& store,
+                                                            UUID uuid,
+                                                            const SizeCountStore::Entry& entry) {
     Lock::GlobalLock writeLock(opCtx, MODE_IX);
     WriteUnitOfWork wuow(opCtx);
-    store.write(opCtx, uuid, entry);
+    const boost::optional<SizeCountStore::Entry> oldValue = store.insert(opCtx, uuid, entry);
     wuow.commit();
+    return oldValue;
 }
 
 void insertSizeCountTimestamp(OperationContext* opCtx,

@@ -265,7 +265,7 @@ using std::string;
 class WiredTigerSessionSweeper : public BackgroundJob {
 public:
     explicit WiredTigerSessionSweeper(WiredTigerConnection* connection)
-        : BackgroundJob(false /* deleteSelf */), _connection(connection) {}
+        : BackgroundJob(/*selfDelete=*/false), _connection(connection) {}
 
     string name() const override {
         return "WTIdleSessionSweeper";
@@ -884,7 +884,7 @@ void WiredTigerKVEngine::cleanShutdown(bool memLeakAllowed) {
 
     _connection->shuttingDown(WiredTigerConnection::ShutdownReason::kCleanShutdown);
 
-    syncSizeInfo(/*syncToDisk=*/true);
+    syncSizeInfo(/*sync=*/true);
 
     // The size storer has to be destructed after the session cache has shut down. This sets the
     // shutdown flag internally in the session cache. As operations get interrupted during
@@ -1261,7 +1261,7 @@ public:
                             "offset"_attr = 0,
                             "size"_attr = fileSize);
                 kvBackupBlocks.push_back(
-                    KVBackupBlock(ident, filePath.string(), 0 /* offset */, length, fileSize));
+                    KVBackupBlock(ident, filePath.string(), /*offset=*/0, length, fileSize));
             }
         }
 
@@ -1339,7 +1339,7 @@ private:
             std::string ident =
                 extractIdentFromPath(boost::filesystem::path(storageGlobalParams.dbpath), filePath);
             kvBackupBlocks->push_back(
-                KVBackupBlock(ident, filePath.string(), 0 /* offset */, 0 /* length */, fileSize));
+                KVBackupBlock(ident, filePath.string(), /*offset=*/0, /*length=*/0, fileSize));
         }
 
         // If the duplicate backup cursor has been exhausted, close it and set

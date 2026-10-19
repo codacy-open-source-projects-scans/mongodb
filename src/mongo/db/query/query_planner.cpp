@@ -821,7 +821,7 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
     QueryPlannerIXSelect::getFields(query.getPrimaryMatchExpression(), &fields);
     // We will not cache queries with 'hint'.
     std::vector<IndexEntry> expandedIndexes = QueryPlannerIXSelect::expandIndexes(
-        fields, params.mainCollectionInfo.indexes, false /* indexHinted */);
+        fields, params.mainCollectionInfo.indexes, /*hintedIndexBson=*/false);
 
     // Map from index name to index number.
     std::map<IndexEntry::Identifier, size_t> indexMap;
@@ -1941,56 +1941,69 @@ StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
     const ce::ExactCardinalityEstimator* exactCardinality,
     std::vector<std::unique_ptr<QuerySolution>> allSoln,
     const CanonicalQuery& query,
-    QueryCBRCEModeEnum ceMode) {
+    QueryCBRCEModeEnum ceMode,
+    bool considerZeroCESampledIXScanNonEstimable) {
     using namespace cost_based_ranker;
     auto cbrMode = ceMode;
     EstimateMap estimates;
     const auto& collInfo = params.mainCollectionInfo;
     tassert(9969001, "CBR received incomplete catalog statistics", collInfo.collStats != nullptr);
-    CardinalityEstimator cardEstimator(collInfo, samplingEstimator, estimates, cbrMode);
+    CardinalityEstimator cardEstimator(
+        collInfo, samplingEstimator, estimates, cbrMode, considerZeroCESampledIXScanNonEstimable);
     CostEstimator costEstimator(estimates);
-    // This set of plans contains the optimal plan. If 'acceptedSoln' contains a single
-    // plan, then that is the optimal (winning) plan chosen by the planner. Otherwise, if there is
-    // more than one plan, those plans are sent to the multi-planner to choose the winning plan.
-    std::vector<std::unique_ptr<QuerySolution>> acceptedSoln;
-    // The set of plans that definitely do not contain the optimal plan. This set is used for
-    // explain to show all rejected plans.
-    std::vector<std::unique_ptr<QuerySolution>> rejectedSoln;
+
+    // TODO SERVER-136418. Consider using bitsets instead of vectors here.
+    // Plans are classified by their index into 'allSoln' and only extracted from it once the
+    // classification is final into 'acceptedSoln' and 'rejectedSoln'.
+    //
+    // If a single index is accepted, that is the optimal (winning) plan chosen by the planner.
+    // Otherwise all plans are sent to the multi-planner to choose the winning plan.
+    std::vector<size_t> acceptedIdx;
+    // Indices of the plans that definitely do not contain the optimal plan. Used by explain to
+    // show all rejected plans.
+    std::vector<size_t> rejectedIdx;
 
     const size_t numCandidates = allSoln.size();
 
     CostEstimate bestCost = maxCost;
-    std::unique_ptr<QuerySolution> bestSoln;
-    for (auto&& soln : allSoln) {
+    boost::optional<size_t> bestIdx;
+    for (size_t solnIdx = 0; solnIdx < allSoln.size(); ++solnIdx) {
+        const auto& soln = *allSoln[solnIdx];
         const auto& ceRes = cbrMode == QueryCBRCEModeEnum::kExactCE
-            ? exactCardinality->calculateExactCardinality(*soln, estimates)
-            : cardEstimator.estimatePlan(*soln);
+            ? exactCardinality->calculateExactCardinality(soln, estimates)
+            : cardEstimator.estimatePlan(soln);
         if (!ceRes.isOK()) {
             // This plan's cardinality cannot be estimated.
             numPlansFailedCostEstimation.increment();
             if (ceRes.getStatus().code() == ErrorCodes::UnsupportedCbrNode) {
                 // Fallback to multi-planning when the reason for the inestimable plan was an
                 // unsupported node.
-                acceptedSoln.push_back(std::move(soln));
+                acceptedIdx.push_back(solnIdx);
+            } else if (considerZeroCESampledIXScanNonEstimable &&
+                       ceRes.getStatus().code() == ErrorCodes::ZeroCEEstimate) {
+                // An index scan that sampling estimated to scan zero keys means "no
+                // matching data observed" rather than a true zero, so this plan's cost cannot be
+                // compared with the others.
+                acceptedIdx.push_back(solnIdx);
             } else {
                 // All other CE modes are considered "strict", that is, when a CE method couldn't
                 // be applied, this is considered a user error.
                 return ceRes.getStatus();
             }
         } else {
-            CostEstimate curCost = costEstimator.estimatePlan(*soln);
+            CostEstimate curCost = costEstimator.estimatePlan(soln);
             // The cost comparison here is epsilon-approximate (approxLt), so plans whose costs are
             // within epsilon of the best are treated as tied.
             if (approxLt(curCost, bestCost)) {
-                if (bestSoln) {
-                    rejectedSoln.push_back(std::move(bestSoln));
+                if (bestIdx.has_value()) {
+                    rejectedIdx.push_back(bestIdx.value());
                 }
-                bestSoln = std::move(soln);
+                bestIdx = solnIdx;
                 bestCost = curCost;
             } else {
                 // TODO SERVER-97933: handle equal cost plans in a deterministic way
                 // For now, we pick one and put the other in rejected plans.
-                rejectedSoln.push_back(std::move(soln));
+                rejectedIdx.push_back(solnIdx);
 
                 if (curCost == bestCost) {
                     numPlansTiedCostEstimation.increment();
@@ -1998,13 +2011,22 @@ StatusWith<PlanRankingResult> QueryPlanner::planWithCostBasedRanking(
             }
         }
     }
-    if (bestSoln) {
-        acceptedSoln.push_back(std::move(bestSoln));
-    }
-    if (acceptedSoln.size() > 1) {
+
+    if (bestIdx.has_value()) {
         // Put the plan with lowest cost (among the estimated plans) first.
-        std::swap(acceptedSoln.front(), acceptedSoln.back());
+        acceptedIdx.insert(acceptedIdx.begin(), bestIdx.value());
     }
+    auto extractSolutions = [&](const std::vector<size_t>& indexes) {
+        std::vector<std::unique_ptr<QuerySolution>> solutions;
+        solutions.reserve(indexes.size());
+        for (size_t idx : indexes) {
+            solutions.push_back(std::move(allSoln[idx]));
+        }
+        return solutions;
+    };
+    auto acceptedSoln = extractSolutions(acceptedIdx);
+    auto rejectedSoln = extractSolutions(rejectedIdx);
+
     tassert(9751901,
             "Some plan has fallen into the gray zone between accepted and rejected QSNs.",
             acceptedSoln.size() + rejectedSoln.size() == numCandidates);
@@ -2084,7 +2106,7 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                                                      groupStage->getAccumulationStatements(),
                                                      groupStage->doingMerge(),
                                                      groupStage->willBeMerged(),
-                                                     isLastSource /* shouldProduceBson */);
+                                                     /*shouldProduceBson=*/isLastSource);
             continue;
         }
 
@@ -2174,7 +2196,7 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                                                    lookupStage->getForeignField()->fullPath(),
                                                    lookupStage->getAsField().fullPath(),
                                                    strategy,
-                                                   isLastSource /* shouldProduceBson */,
+                                                   /*shouldProduceBson=*/isLastSource,
                                                    collationCompatibleForDilj);
             } else {
                 const boost::intrusive_ptr<DocumentSourceUnwind>& unwindSrc =
@@ -2187,7 +2209,7 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
                                                    lookupStage->getForeignField()->fullPath(),
                                                    lookupStage->getAsField().fullPath(),
                                                    strategy,
-                                                   isLastSource /* shouldProduceBson */,
+                                                   /*shouldProduceBson=*/isLastSource,
                                                    // $unwind-specific data members.
                                                    unwindSrc->preserveNullAndEmptyArrays(),
                                                    unwindSrc->indexPath(),
@@ -2208,7 +2230,7 @@ std::unique_ptr<QuerySolution> QueryPlanner::extendWithAggPipeline(
         auto unwindStage = dynamic_cast<DocumentSourceUnwind*>(innerStage);
         if (unwindStage) {
             solnForAgg = std::make_unique<UnwindNode>(
-                std::move(solnForAgg) /* child */,
+                /*child=*/std::move(solnForAgg),
                 UnwindNode::UnwindSpec{unwindStage->getUnwindPath() /* fieldPath */,
                                        unwindStage->preserveNullAndEmptyArrays(),
                                        unwindStage->indexPath()});

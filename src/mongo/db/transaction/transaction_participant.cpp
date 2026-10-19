@@ -59,6 +59,7 @@
 #include "mongo/db/shard_role/shard_catalog/uncommitted_catalog_updates.h"
 #include "mongo/db/shard_role/shard_role.h"
 #include "mongo/db/shard_role/transaction_resources.h"
+#include "mongo/db/stats/server_initiated_transaction.h"
 #include "mongo/db/storage/exceptions.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
@@ -320,7 +321,7 @@ ActiveTransactionHistory fetchActiveTransactionHistory(OperationContext* opCtx,
     // Restore the current timestamp read source after fetching transaction history, which may
     // change our ReadSource.
     ReadSourceScope readSourceScope(
-        opCtx, RecoveryUnit::ReadSource::kNoTimestamp, boost::none, true /* waitForOplog */);
+        opCtx, RecoveryUnit::ReadSource::kNoTimestamp, boost::none, /*waitForOplog=*/true);
     auto originalReadConcern =
         std::exchange(repl::ReadConcernArgs::get(opCtx), repl::ReadConcernArgs());
     ON_BLOCK_EXIT([&] { repl::ReadConcernArgs::get(opCtx) = std::move(originalReadConcern); });
@@ -1163,6 +1164,14 @@ void TransactionParticipant::Participant::beginOrContinue(
     const boost::optional<TransactionRuntimeContext>& transactionRuntimeContext,
     const boost::optional<bool> isServerInitiatedTransaction) {
     opCtx->setActiveTransactionParticipant();
+
+    // Save this participant's classification of the transaction so we can forward it in case this
+    // shard goes on to act as a sub-router.
+    ScopeGuard saveClassification([&] {
+        if (transactionIsOpen()) {
+            participantIsInServerInitiatedTransaction(opCtx) = this->isServerInitiatedTransaction();
+        }
+    });
 
     if (_isInternalSessionForRetryableWrite()) {
         auto parentTxnParticipant =
@@ -2172,7 +2181,6 @@ void TransactionParticipant::Participant::restorePreparedTxnFromPreciseCheckpoin
     if (isReplicatedFastCountEnabled(opCtx)) {
         if (const auto& sizeMetadata = p().preparedSizeMetadata) {
             const auto catalog = CollectionCatalog::get(opCtx);
-            auto& uncommittedChanges = UncommittedFastCountChanges::getForWrite(opCtx);
             for (const auto& metadata : *sizeMetadata) {
                 const Collection* collection =
                     catalog->lookupCollectionByUUID(opCtx, metadata.getUuid());
@@ -2181,7 +2189,8 @@ void TransactionParticipant::Participant::restorePreparedTxnFromPreciseCheckpoin
                                     "in config.transactions with UUID {}",
                                     metadata.getUuid().toString()),
                         collection);
-                uncommittedChanges.record(
+                UncommittedFastCountChanges::record(
+                    opCtx,
                     collection->ns(),
                     metadata.getUuid(),
                     UncommittedFastCountChange{
@@ -2587,7 +2596,7 @@ void TransactionParticipant::Participant::_commitSplitPreparedTxnOnPrimary(
             // original transaction is already holding RSTL in IX mode. We also should not
             // try to acquire RSTL again because that could deadlock with stepdown.
             newTxnParticipant._commitStorageTransaction(splitOpCtx.get(),
-                                                        true /* isSplitPreparedTxn */);
+                                                        /*isSplitPreparedTxn=*/true);
             // transactionOperations may be unavailable if the transaction was recovered from a
             // checkpoint, but that's acceptable because it will only lead to incorrect per
             // transaction metrics.
@@ -2870,7 +2879,7 @@ void TransactionParticipant::Participant::_abortSplitPreparedTxnOnPrimary(
             // original transaction is already holding RSTL in IX mode. We also should not
             // try to acquire RSTL again because that could deadlock with stepdown.
             newTxnParticipant._cleanUpTxnResourceOnOpCtx(
-                splitOpCtx.get(), TerminationCause::kAborted, true /* isSplitPreparedTxn */);
+                splitOpCtx.get(), TerminationCause::kAborted, /*isSplitPreparedTxn=*/true);
             newTxnParticipant._finishAbortingActiveTransaction(splitOpCtx.get(),
                                                                TransactionState::kPrepared);
         }

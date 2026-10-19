@@ -185,6 +185,10 @@ protected:
         return getBasicCoordinatorAttrs();
     }
 
+    virtual bool _shouldLogCompletionErrorAsWarning(const Status&) const {
+        return false;
+    }
+
     /*
      * Specify if the coordinator must indefinitely be retried in case of exceptions. It is always
      * expected for a coordinator to make progress after performing intermediate operations that
@@ -254,6 +258,9 @@ protected:
 
     virtual void _checkCoordinatorPreconditions(OperationContext* opCtx, bool afterAcquiringLocks) {
     }
+
+    virtual void _checkIndexBuildsInProgress(std::shared_ptr<executor::ScopedTaskExecutor> executor,
+                                             const CancellationToken& token) {}
 
     virtual ExecutorFuture<void> _acquireLocksAsync(
         OperationContext* opCtx,

@@ -77,7 +77,8 @@ TEST_F(FlusherTest, FlushPersistsBatch) {
     EXPECT_EQ(result->previousValidAsOfTS, Timestamp::min());
     EXPECT_EQ(result->newValidAsOfTS, Timestamp(1, 2));
     EXPECT_EQ(result->checkpointBufferSize, 1);
-    EXPECT_EQ(result->entryWriteCount, 1);
+    EXPECT_EQ(result->writeCounts,
+              (CheckpointWriteCounts{.entryWriteCount = 1, .insertCount = 1, .updateCount = 0}));
     EXPECT_EQ(result->flushAttempts, 1);
 
     const auto entry = readSizeCount(collA.uuid);
@@ -90,11 +91,6 @@ TEST_F(FlusherTest, FlushPersistsBatch) {
 }
 
 TEST_F(FlusherTest, FlushWithNoNewWorkIsNoOp) {
-    OtelMetricsCapturer capturer;
-    if (!capturer.canReadMetrics()) {
-        GTEST_SKIP() << "Skipping test due to OTel metrics being unavailable in this build";
-    }
-
     // No persisted timestamp.
     {
         const OplogScanResult batch{

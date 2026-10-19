@@ -74,7 +74,7 @@ void blockAndDrainConflictingDDLs(OperationContext* opCtx) {
 }
 
 void unblockConflictingDDLs(OperationContext* opCtx) {
-    broadcastHistoryInitializationState(opCtx, false /*isInProgress*/);
+    broadcastHistoryInitializationState(opCtx, /*isInProgress=*/false);
 }
 
 void broadcastPlacementHistoryChangedNotification(
@@ -97,7 +97,7 @@ void broadcastPlacementHistoryChangedNotification(
         **executor, token, std::move(request));
 
     auto responses = sharding_ddl_util::sendAuthenticatedCommandToShards(
-        opCtx, opts, std::move(allShards), false /* throwOnError */);
+        opCtx, opts, std::move(allShards), /*throwOnError=*/false);
     for (const auto& response : responses) {
         auto status = AsyncRequestsSender::Response::getEffectiveStatus(response);
         if (status.isOK()) {
@@ -132,6 +132,11 @@ std::set<NamespaceString> InitializePlacementHistoryCoordinator::_getAdditionalL
     // The execution of this coordinator requires a stable topology on multiple phases.
     // Request the acquisition of an X lock on config.shards to block shard add/remove operations.
     return {NamespaceString::kConfigsvrShardsNamespace};
+}
+
+std::set<NamespaceString> InitializePlacementHistoryCoordinator::_conflictingIndexBuildNamespaces(
+    ShardingCoordinator& self, OperationContext* opCtx) {
+    return {self.originalNss()};
 }
 
 ExecutorFuture<void> InitializePlacementHistoryCoordinator::_runImpl(

@@ -269,7 +269,8 @@ Status insertDocumentsForOplog(OperationContext* opCtx,
     }
 
     if (isReplicatedFastCountEnabled(opCtx)) {
-        UncommittedFastCountChanges::getForWrite(opCtx).record(
+        UncommittedFastCountChanges::record(
+            opCtx,
             oplogCollection->ns(),
             oplogCollection->uuid(),
             UncommittedFastCountChange{
@@ -786,7 +787,7 @@ void createOplog(OperationContext* opCtx,
     // lag later when we try to sync.
     auto& rss = rss::ReplicatedStorageService::get(service);
     if (rss.getPersistenceProvider().supportsUnstableCheckpoints()) {
-        service->getStorageEngine()->flushAllFiles(opCtx, /*callerHoldsReadLock*/ false);
+        service->getStorageEngine()->flushAllFiles(opCtx, /*callerHoldsReadLock=*/false);
     }
 }
 
@@ -1777,9 +1778,11 @@ bool isValidationHashVerifiableFor(OperationContext* opCtx,
     if (mode != OplogApplication::Mode::kSecondary) {
         return false;
     }
-    if (!collection->areRecordIdsReplicated() &&
-        !(collection->isClustered() &&
-          clustered_util::isClusteredOnId(collection->getClusteredInfo()))) {
+    // Emergency override that only skips hash verification.
+    if (MONGO_unlikely(disableContinuousInternodeValidation.load())) {
+        return false;
+    }
+    if (!isCollectionHashEligible(collection)) {
         return false;
     }
     if (!isContinuousInternodeValidationPerDocumentEnabled(opCtx)) {
@@ -1787,8 +1790,7 @@ bool isValidationHashVerifiableFor(OperationContext* opCtx,
     }
     // Resharding's collections may carry a hash, but are materialized at-least-once and commit
     // transiently invalid documents that self-heal, so they are not verified.
-    const auto& nss = collection->ns();
-    return isReplicatedFastCountEligible(nss) && !isReshardingInternalCollection(nss);
+    return !isReshardingInternalCollection(collection->ns());
 }
 }  // namespace
 
@@ -1938,7 +1940,7 @@ UpdateResult updateObjectByRid(OperationContext* opCtx,
                                         OplogConstraintViolationEnum::kUpdateOnMissingDoc,
                                         "update",
                                         opObj,
-                                        boost::none /* status */);
+                                        /*status=*/boost::none);
             uasserted(11979201,
                       fmt::format("While applying an update oplog entry : '{}' during steady state "
                                   "replication with timestamp : '{}' and term : '{}' to a "
@@ -1967,7 +1969,7 @@ UpdateResult updateObjectByRid(OperationContext* opCtx,
                                         OplogConstraintViolationEnum::kUpdateOnMissingDoc,
                                         "update",
                                         opObj,
-                                        boost::none /* status */);
+                                        /*status=*/boost::none);
             // This error is always fatal regardless of steady state constraints. We throw an error
             // here instead of deferring to the typical numMatched = 0 handling since this should
             // be a fatal error for capped collections.
@@ -2026,7 +2028,7 @@ UpdateResult updateObjectByRid(OperationContext* opCtx,
                 OplogConstraintViolationEnum::kRecordIdsReplicatedDocIdMismatch,
                 "update",
                 opObj,
-                boost::none /* status */);
+                /*status=*/boost::none);
             // This error is always fatal regardless of steady state constraints. We throw an error
             // here instead of deferring to the typical numMatched = 0 handling since this should
             // also be a fatal error for capped collections.
@@ -2091,7 +2093,7 @@ UpdateResult updateObjectByRid(OperationContext* opCtx,
                         OplogConstraintViolationEnum::kReplicatedSizeDeltaMismatch,
                         "update",
                         redact(op.toBSONForLogging()),
-                        boost::none /* status */);
+                        /*status=*/boost::none);
                 }
                 uassert(
                     12380201,
@@ -2154,7 +2156,7 @@ DeleteResult deleteObjectByRid(OperationContext* opCtx,
                                         OplogConstraintViolationEnum::kDeleteOnMissingNs,
                                         "delete",
                                         opObj,
-                                        boost::none /* status */);
+                                        /*status=*/boost::none);
             uasserted(11979200,
                       fmt::format("While applying a delete oplog entry : '{}' during steady state "
                                   "replication with timestamp : '{}' and term : '{}' to a "
@@ -2181,7 +2183,7 @@ DeleteResult deleteObjectByRid(OperationContext* opCtx,
                                         OplogConstraintViolationEnum::kDeleteWasEmpty,
                                         "update",
                                         opObj,
-                                        boost::none /* status */);
+                                        /*status=*/boost::none);
             // This error is always fatal regardless of steady state constraints. We throw an error
             // here instead of deferring to the typical nDeleted = 0 handling since this should
             // be a fatal error for capped collections. We also don't need the special casing that
@@ -2214,7 +2216,7 @@ DeleteResult deleteObjectByRid(OperationContext* opCtx,
                 OplogConstraintViolationEnum::kRecordIdsReplicatedDocIdMismatch,
                 "delete",
                 opObj,
-                boost::none /* status */);
+                /*status=*/boost::none);
             // This error is always fatal regardless of steady state constraints. We throw an error
             // here instead of deferring to the typical nDeleted = 0 handling since this should also
             // be a fatal error for capped collections.
@@ -2284,7 +2286,7 @@ DeleteResult deleteObjectByRid(OperationContext* opCtx,
                         OplogConstraintViolationEnum::kReplicatedSizeDeltaMismatch,
                         "delete",
                         redact(op.toBSONForLogging()),
-                        boost::none /* status */);
+                        /*status=*/boost::none);
                 }
                 uassert(
                     12380200,
@@ -2665,7 +2667,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                                                                      insertObjs.begin(),
                                                                      insertObjs.end(),
                                                                      nullOpDebug,
-                                                                     false /* fromMigrate */);
+                                                                     /*fromMigrate=*/false);
                 if (!status.isOK()) {
                     return status;
                 }
@@ -2773,7 +2775,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                         // skip this if oplog entries are being grouped because the timestamp will
                         // be allocated at commit time.
                         auto oplogInfo = LocalOplogInfo::get(opCtx);
-                        auto oplogSlots = oplogInfo->getNextOpTimes(opCtx, /*batchSize=*/1);
+                        auto oplogSlots = oplogInfo->getNextOpTimes(opCtx, /*count=*/1);
                         insertStmt.oplogSlot = oplogSlots.front();
                     }
 
@@ -2785,7 +2787,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     }
                     OpDebug* const nullOpDebug = nullptr;
                     Status status = collection_internal::insertDocument(
-                        opCtx, collection, insertStmt, nullOpDebug, false /* fromMigrate */);
+                        opCtx, collection, insertStmt, nullOpDebug, /*fromMigrate=*/false);
 
                     if (status.isOK()) {
                         if (shouldVerifyValidationHash(opCtx, collection, mode, op)) {
@@ -2814,7 +2816,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                                 OplogConstraintViolationEnum::kInsertOnExistingDoc,
                                 "insert",
                                 opObj,
-                                boost::none /* status */);
+                                /*status=*/boost::none);
 
                             if (oplogApplicationEnforcesSteadyStateConstraints.load()) {
                                 return status;
@@ -3109,7 +3111,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                                 OplogConstraintViolationEnum::kUpdateOnMissingDoc,
                                 "update",
                                 redact(op.toBSONForLogging()),
-                                boost::none /* status */);
+                                /*status=*/boost::none);
 
                             // We shouldn't be doing upserts in secondary mode when enforcing steady
                             // state constraints.
@@ -3349,7 +3351,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                                 OplogConstraintViolationEnum::kDeleteWasEmpty,
                                 "delete",
                                 opObj,
-                                boost::none /* status */);
+                                /*status=*/boost::none);
                         } else {
                             opCountersToUse->gotDeleteFromMissingNamespace();
                             logOplogConstraintViolation(
@@ -3358,7 +3360,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                                 OplogConstraintViolationEnum::kDeleteOnMissingNs,
                                 "delete",
                                 opObj,
-                                boost::none /* status */);
+                                /*status=*/boost::none);
                         }
 
                         if (!isCapped) {

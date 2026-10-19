@@ -11,6 +11,7 @@
 #include "mongo/db/query/compiler/optimizer/index_bounds_builder/index_bounds_builder.h"
 #include "mongo/db/query/compiler/physical_model/query_solution/stage_types.h"
 #include "mongo/db/query/query_optimization_knobs_gen.h"
+#include "mongo/logv2/log.h"
 
 #include <algorithm>
 #include <string_view>
@@ -39,14 +40,16 @@ size_t totalIntervalCount(const IndexBounds& bounds) {
 CardinalityEstimator::CardinalityEstimator(const CollectionInfo& collInfo,
                                            const ce::SamplingEstimator* samplingEstimator,
                                            EstimateMap& qsnEstimates,
-                                           QueryCBRCEModeEnum rankerMode)
+                                           QueryCBRCEModeEnum rankerMode,
+                                           bool considerZeroCESampledIXScanNonEstimable)
     : _collCard{CardinalityEstimate{CardinalityType{collInfo.collStats->getCardinality()},
                                     EstimationSource::Metadata}},
       _inputCard{_collCard},
       _collInfo(collInfo),
       _samplingEstimator(samplingEstimator),
       _qsnEstimates{qsnEstimates},
-      _ceMode(rankerMode) {
+      _ceMode(rankerMode),
+      _considerZeroCESampledIXScanNonEstimable(considerZeroCESampledIXScanNonEstimable) {
     if (_ceMode == QueryCBRCEModeEnum::kSamplingCE) {
         tassert(9746501,
                 "samplingEstimator cannot be null when CBRCEMode is samplingCE",
@@ -91,7 +94,7 @@ CEResult CardinalityEstimator::estimateFilter(const MatchExpression* filter) {
     _inputCard = _collCard;
     _conjSels.clear();
 
-    auto ceRes = estimate(filter, true /* isFilterRoot */);
+    auto ceRes = estimate(filter, /*isFilterRoot=*/true);
     if (!ceRes.isOK()) {
         return ceRes;
     }
@@ -717,6 +720,19 @@ CEResult CardinalityEstimator::estimate(const IndexScanNode* node) {
             }
         }
 
+        if (_considerZeroCESampledIXScanNonEstimable && est.inCE.has_value() &&
+            est.inCE.value() == zeroCE) {
+            LOGV2_DEBUG(13336200,
+                        2,
+                        "Aborting CBR plan estimation: an index scan's input cardinality estimate "
+                        "is zero. The plan will be ranked by the multi-planner instead",
+                        "stage"_attr = nodeStageTypeToString(node),
+                        "ceSource"_attr = toStringData(est.inCE->source()));
+            return Status(ErrorCodes::ZeroCEEstimate,
+                          str::stream() << "Node " << nodeStageTypeToString(node)
+                                        << " has a zero input cardinality estimate");
+        }
+
         auto seekCE = estimateIndexSeeks(node->bounds, node->index.multikey);
         if (seekCE.isOK()) {
             est.indexSeekCE = seekCE.getValue();
@@ -951,17 +967,17 @@ CEResult CardinalityEstimator::estimateConjWithHistogram(
 
     // At this point, we know that 'path' is non-multikey, so we can safely build an interval for
     // each conjunct and intersect them.
-    IndexEntry fakeIndex(BSON(path << "1") /* keyPattern */,
+    IndexEntry fakeIndex(/*kp=*/BSON(path << "1"),
                          INDEX_BTREE,
                          IndexDescriptor::IndexVersion::kV2,
-                         false /* multikey */,
-                         {} /* multikeyPaths */,
-                         {} /* multikeyPathSet */,
-                         false /* sparse */,
-                         false /* unique */,
+                         /*mk=*/false,
+                         /*mkp=*/{},
+                         /*multikeyPathSet=*/{},
+                         /*sp=*/false,
+                         /*unq=*/false,
                          CoreIndexInfo::Identifier("idx"),
-                         BSONObj::kEmptyObject /* infoObj */,
-                         nullptr /* wildcardProjection */);
+                         /*io=*/BSONObj::kEmptyObject,
+                         /*wildcardProjection=*/nullptr);
     OrderedIntervalList oil;
     IndexBoundsBuilder::allValuesForField(fakeIndex.keyPattern.firstElement(), &oil);
     IndexBoundsBuilder::BoundsTightness tightness;

@@ -17,7 +17,7 @@ namespace mongo::plan_explainer_factory {
 std::unique_ptr<PlanExplainer> make(PlanStage* root,
                                     boost::optional<size_t> cachedPlanHash,
                                     boost::optional<std::string> replanReason) {
-    return make(root, cachedPlanHash, std::move(replanReason), boost::none, false /* isExplain */);
+    return make(root, cachedPlanHash, std::move(replanReason), boost::none, /*isExplain=*/false);
 }
 
 std::unique_ptr<PlanExplainer> make(PlanStage* root,
@@ -50,7 +50,6 @@ std::unique_ptr<PlanExplainer> make(
     std::unique_ptr<PlanStage> classicRuntimePlannerStage,
     RemoteExplainVector* remoteExplains,
     bool usedJoinOpt,
-    cost_based_ranker::EstimateMap estimates,
     std::vector<JoinOptPlan> rejectedPlans,
     boost::optional<PlanExplainerData> maybeExplainData,
     boost::optional<PlanSelectionStrategy> planSelectionStrategy) {
@@ -69,7 +68,6 @@ std::unique_ptr<PlanExplainer> make(
         std::move(classicRuntimePlannerStage),
         remoteExplains,
         usedJoinOpt,
-        std::move(estimates),
         std::move(rejectedPlans),
         std::move(maybeExplainData),
         planSelectionStrategy);

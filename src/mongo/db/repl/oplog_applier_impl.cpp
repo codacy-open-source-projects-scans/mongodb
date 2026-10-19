@@ -161,10 +161,14 @@ Status finishAndLogApply(OperationContext* opCtx,
             attrs.add("duration", Milliseconds(opDuration));
 
             // Obtain storage specific statistics and log them if they exist.
-            CurOp::get(opCtx)->debug().storageStats =
-                shard_role_details::getRecoveryUnit(opCtx)
-                    ->computeOperationStatisticsSinceLastCall();
-            CurOp::get(opCtx)->debug().reportStorageStats(&attrs);
+            auto storageStats = shard_role_details::getRecoveryUnit(opCtx)
+                                    ->computeOperationStatisticsSinceLastCall();
+            auto* curOp = CurOp::get(opCtx);
+            {
+                auto debugInfoLock = curOp->lockCrossThreadDebugInfo();
+                curOp->debug().storageStats = std::move(storageStats);
+            }
+            curOp->debug().reportStorageStats(&attrs);
 
             LOGV2(51801, "Applied op", attrs);
         }
@@ -571,9 +575,9 @@ OplogApplierImpl::OplogApplierImpl(executor::TaskExecutor* executor,
             .shouldDisableTransactionUpdateCoalescing();
 
     _oplogWriter =
-        std::make_unique<OplogWriterImpl>(nullptr /* executor */,
-                                          nullptr /* writeBuffer */,
-                                          nullptr /* applyBuffer */,
+        std::make_unique<OplogWriterImpl>(/*executor=*/nullptr,
+                                          /*writeBuffer=*/nullptr,
+                                          /*applyBuffer=*/nullptr,
                                           workerPool,
                                           replCoord,
                                           storageInterface,
@@ -1019,7 +1023,7 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
                                                      &derivedOps->back(),
                                                      writerVectors,
                                                      &collPropertiesCache,
-                                                     false /*serial*/);
+                                                     /*serial=*/false);
                 }
             };
 
@@ -1121,11 +1125,11 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
                 auto applyOpsOps = ApplyOps::extractOperations(op);
                 OplogApplierUtils::expandBatchedContainerOps(applyOpsOps);
                 auto& extractedOps = retryImageRectifier.storeExtractedOpsAndDeletes(
-                    std::move(applyOpsOps), derivedOps, false /* isPrepared */);
+                    std::move(applyOpsOps), derivedOps, /*isPrepared=*/false);
 
                 // Nested entries cannot have different session updates.
                 OplogApplierUtils::addDerivedOps(
-                    opCtx, &extractedOps, writerVectors, &collPropertiesCache, false /*serial*/);
+                    opCtx, &extractedOps, writerVectors, &collPropertiesCache, /*serial=*/false);
             }
             continue;
         }
@@ -1166,7 +1170,7 @@ void OplogApplierImpl::_deriveOpsAndFillWriterVectors(
                                                  &derivedOps->back(),
                                                  writerVectors,
                                                  &collPropertiesCache,
-                                                 false /*serial*/);
+                                                 /*serial=*/false);
                 continue;
             }
         }

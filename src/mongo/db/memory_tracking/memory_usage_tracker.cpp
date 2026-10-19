@@ -59,18 +59,20 @@ MONGO_COMPILER_NOINLINE void memoryTrackingUnderflowFailed(int64_t diff, int64_t
 }  // namespace
 
 SimpleMemoryUsageTracker::SimpleMemoryUsageTracker(SimpleMemoryUsageTracker* base,
-                                                   MemoryUsageLimit maxAllowedMemoryUsageBytes,
-                                                   int64_t chunkSize)
+                                                   MemoryUsageLimit maxAllowedMemoryUsageBytes)
     : _base(base),
-      _chunkSize(chunkSize),
+      _curOpWriteChunkSize(1),
       _maxAllowedMemoryUsageBytes(std::move(maxAllowedMemoryUsageBytes)) {}
 
-SimpleMemoryUsageTracker::SimpleMemoryUsageTracker(MemoryUsageLimit maxAllowedMemoryUsageBytes,
-                                                   int64_t chunkSize)
-    : SimpleMemoryUsageTracker(nullptr, std::move(maxAllowedMemoryUsageBytes), chunkSize) {}
+SimpleMemoryUsageTracker::SimpleMemoryUsageTracker(MemoryUsageLimit maxAllowedMemoryUsageBytes)
+    : SimpleMemoryUsageTracker(nullptr, std::move(maxAllowedMemoryUsageBytes)) {}
 
-SimpleMemoryUsageTracker::SimpleMemoryUsageTracker()
-    : SimpleMemoryUsageTracker(MemoryUsageLimit{std::numeric_limits<int64_t>::max()}) {}
+SimpleMemoryUsageTracker::SimpleMemoryUsageTracker(SimpleMemoryUsageTracker* base,
+                                                   MemoryUsageLimit maxAllowedMemoryUsageBytes,
+                                                   int64_t curOpWriteChunkSize)
+    : _base(base),
+      _curOpWriteChunkSize(std::max<int64_t>(curOpWriteChunkSize, 1)),
+      _maxAllowedMemoryUsageBytes(std::move(maxAllowedMemoryUsageBytes)) {}
 
 void SimpleMemoryUsageTracker::setWriteToCurOp(std::function<void(int64_t, int64_t)> writeToCurOp) {
     _writeToCurOp = std::move(writeToCurOp);
@@ -78,10 +80,8 @@ void SimpleMemoryUsageTracker::setWriteToCurOp(std::function<void(int64_t, int64
 
 MemoryUsageTracker::MemoryUsageTracker(SimpleMemoryUsageTracker* baseParent,
                                        bool allowDiskUse,
-                                       MemoryUsageLimit maxMemoryUsageBytes,
-                                       int64_t chunkSize)
-    : _allowDiskUse(allowDiskUse),
-      _baseTracker(baseParent, std::move(maxMemoryUsageBytes), chunkSize) {}
+                                       MemoryUsageLimit maxMemoryUsageBytes)
+    : _allowDiskUse(allowDiskUse), _baseTracker(baseParent, std::move(maxMemoryUsageBytes)) {}
 
 MemoryUsageTracker::MemoryUsageTracker(bool allowDiskUse, MemoryUsageLimit maxMemoryUsageBytes)
     : MemoryUsageTracker(nullptr, allowDiskUse, std::move(maxMemoryUsageBytes)) {}
@@ -96,63 +96,59 @@ void MemoryUsageTracker::add(std::string_view name, int64_t diff) {
 
 
 DeduplicatorReporter::DeduplicatorReporter(std::function<void(int64_t, int64_t)> callback,
-                                           int64_t chunkSize)
-    : _chunkSize(chunkSize), _reportCallback(std::move(callback)) {
-    tassert(11114200, "Expected positive value for chunkSize", _chunkSize > 0);
+                                           int64_t serverStatusChunkSize)
+    : _serverStatusChunkSize(serverStatusChunkSize), _reportCallback(std::move(callback)) {
+    tassert(
+        11114200, "Expected positive value for serverStatusChunkSize", _serverStatusChunkSize > 0);
 }
 
-void SimpleMemoryUsageTracker::addInternal(int64_t diff, bool report) {
+void SimpleMemoryUsageTracker::addInternal(int64_t diff) {
     // The public 'add()' only calls internal 'addInternal()' function for diff values != 0.
     dassert(diff != 0);
 
-    int64_t inUse = _inUseTrackedMemoryBytes + diff;
-    _inUseTrackedMemoryBytes = inUse;
-    if (MONGO_unlikely(inUse < 0)) {
-        memoryTrackingUnderflowFailed(diff, inUse - diff);
+    _inUseTrackedMemoryBytes += diff;
+    if (MONGO_unlikely(_inUseTrackedMemoryBytes < 0)) {
+        memoryTrackingUnderflowFailed(diff, _inUseTrackedMemoryBytes - diff);
     }
-    _peakTrackedMemoryBytes = std::max(_peakTrackedMemoryBytes, inUse);
+    _peakTrackedMemoryBytes = std::max(_peakTrackedMemoryBytes, _inUseTrackedMemoryBytes);
 
-    // When chunking is enabled we report to CurOp only when usage crosses a chunk boundary (0,
-    // chunkSize, 2*chunkSize, ...), and also whenever it returns to zero so CurOp does not keep a
-    // stale value once all memory is released. This avoids the lock contention of touching CurOp's
-    // atomics on every update. The chunk size may live on an intermediate tracker rather than the
-    // root, so the decision is computed here and carried in 'report' to the root, which performs
-    // the CurOp write.
-    if (_chunkSize) {
-        // '_lastReportedLowerBound' is only ever assigned a multiple of '_chunkSize', and 'inUse'
-        // is known to be non-negative here, so 'offsetSinceLastReported' locates 'inUse' relative
-        // to the chunk we last reported: [0, chunkSize) is that same chunk, and anything else is a
-        // boundary crossing.
+    // '_base' always gets the exact diff, regardless of chunking, so ancestors' totals -- and
+    // therefore limit enforcement -- are never stale.
+    if (_base) {
+        _base->addInternal(diff);
+    }
+
+    if (!_writeToCurOp) {
+        return;
+    }
+
+    // We report to CurOp only when usage crosses a chunk boundary and also whenever it returns to
+    // zero -- except that until the first crossing, nothing has ever been reported, so there is
+    // nothing for CurOp to be stale about, and a return to zero from that untouched state must not
+    // report either. '_lastReportedLowerBound' is -1 exactly in that "never reported" state; once a
+    // report has happened it is always a non-negative multiple of '_curOpWriteChunkSize'.
+    if (_lastReportedLowerBound < 0) {
+        if (_inUseTrackedMemoryBytes < _curOpWriteChunkSize) {
+            return;
+        }
+    } else {
+        // '_curOpWriteChunkSize' is clamped to at least 1 by the constructor, so this always
+        // terminates in a report -- chunk size 1 behaves exactly like "no chunking," since
+        // 'offsetSinceLastReported' is then just 'diff', which add() guarantees is non-zero.
         //
-        // Note this fires at one level of the chain only: the per-accumulator child trackers
-        // ('MemoryUsageTracker::operator[]') and the root operation tracker are both built with
-        // 'chunkSize == 0', so only a stage's own base tracker gets here.
-        const int64_t offsetSinceLastReported = inUse - _lastReportedLowerBound;
-
-        if (static_cast<uint64_t>(offsetSinceLastReported) < static_cast<uint64_t>(_chunkSize)) {
-            // 'diff' is always non-zero, as add() is the only entry point and it filters those
-            // out, so returning to zero always means a transition to zero.
-            report = (inUse == 0);
-        } else {
-            // A crossing, so the bound moves and a report is always due. ('inUse == 0' is included:
-            // zero is only outside the chunk last reported when that chunk was not the one starting
-            // at zero, and the return-to-zero case inside that chunk is handled above.)
-            //
-            // Stepping the bound by one chunk instead of dividing was measured here and did not
-            // pay: it trades the divide for data-dependent branches, which is a wash even when
-            // every update crosses. Not worth the extra code.
-            _lastReportedLowerBound = (inUse / _chunkSize) * _chunkSize;
-            report = true;
+        // A negative offset -- usage moved below the last reported bound -- wraps to a huge
+        // unsigned value, so any downward move reports immediately rather than being swallowed.
+        const int64_t offsetSinceLastReported = _inUseTrackedMemoryBytes - _lastReportedLowerBound;
+        if (static_cast<uint64_t>(offsetSinceLastReported) <
+                static_cast<uint64_t>(_curOpWriteChunkSize) &&
+            _inUseTrackedMemoryBytes != 0) {
+            return;
         }
     }
-
-    if (_base) {
-        _base->addInternal(diff, report);
-    } else if (report && _writeToCurOp) {
-        // 'report' is tested first so that the common non-reporting case does not have to load
-        // the std::function's target pointer.
-        reportToCurOp();
-    }
+    reportToCurOp();
+    _lastReportedLowerBound = _inUseTrackedMemoryBytes == 0
+        ? -1
+        : (_inUseTrackedMemoryBytes / _curOpWriteChunkSize) * _curOpWriteChunkSize;
 }
 
 // This function is often used on the hot path of memory tracking. Don't add an unnecessary stack
@@ -179,8 +175,7 @@ void SimpleMemoryUsageTracker::resetBase(SimpleMemoryUsageTracker* base) {
 SimpleMemoryUsageTracker SimpleMemoryUsageTracker::makeFreshSimpleMemoryUsageTracker() const {
     // Copy the limit holder itself rather than a resolved byte count, so that any future
     // lazily-resolved limit stays lazy in the fresh tracker.
-    SimpleMemoryUsageTracker memTracker =
-        SimpleMemoryUsageTracker{_base, _maxAllowedMemoryUsageBytes, _chunkSize};
+    SimpleMemoryUsageTracker memTracker{_base, _maxAllowedMemoryUsageBytes, _curOpWriteChunkSize};
     memTracker.setWriteToCurOp(_writeToCurOp);
     return memTracker;
 }
@@ -229,11 +224,12 @@ void DeduplicatorReporter::add(int64_t bytesDiff, int64_t recordsDiff) {
                           << " but only " << _inUseTrackedMemoryBytes - bytesDiff << " available",
             _inUseTrackedMemoryBytes >= 0);
 
-    // When chunking is enabled, we report memory usage in discrete chunks (0, chunkSize,
-    // 2*chunkSize, ...) rather than exact values.
+    // When chunking is enabled, we report memory usage in discrete chunks (0,
+    // serverStatusChunkSize, 2*serverStatusChunkSize, ...) rather than exact values.
     // This is to avoid performance regressions, but will also result having slightly less
     // accurate statistics in serverStatus.
-    int64_t newLowerBound = (_inUseTrackedMemoryBytes / _chunkSize) * _chunkSize;
+    int64_t newLowerBound =
+        (_inUseTrackedMemoryBytes / _serverStatusChunkSize) * _serverStatusChunkSize;
 
     // Nothing to report, early exit.
     if (newLowerBound == _lastReportedLowerBound) {

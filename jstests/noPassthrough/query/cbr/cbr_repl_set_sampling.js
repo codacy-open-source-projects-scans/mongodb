@@ -8,7 +8,6 @@
  */
 
 import {getAllPlans} from "jstests/libs/query/analyze_plan.js";
-import {checkSbeRestrictedOrFullyEnabled} from "jstests/libs/query/sbe_util.js";
 import {ReplSetTest} from "jstests/libs/replsettest.js";
 
 let docs = [];
@@ -56,12 +55,6 @@ for (const config of samplingConfigs) {
     rst.initiate();
 
     const db = rst.getPrimary().getDB("test");
-    // TODO SERVER-92589: Remove this exemption once CBR supports SBE.
-    if (checkSbeRestrictedOrFullyEnabled(db)) {
-        jsTest.log.info(`Skipping test because CBR does not support SBE`);
-        rst.stopSet();
-        quit();
-    }
 
     // Create a collection and insert some data.
     const coll = db[jsTestName()];
@@ -71,8 +64,11 @@ for (const config of samplingConfigs) {
 
     // Run a query with explain and check that the plans are costed using samplingCE. On a replica
     // set the sampling read relies on majority-committed data, which can briefly lag the inserts
-    // above. Poll until every candidate plan is costed via sampling.
-    const samplingQuery = {a: {$gt: 500}, b: {$lt: 5}};
+    // above. Poll until every candidate plan is costed via sampling. Both predicates must match
+    // within any sample - in particular the sequential-scan sample, which only covers the first
+    // few hundred documents (a = 0..~383) - since a zero scan estimate (ZeroCEEstimate) would
+    // make CBR hand the plans to the multi-planner uncosted.
+    const samplingQuery = {a: {$gt: 100}, b: {$lt: 5}};
     assert.soon(
         () => {
             const plans = getAllPlans(coll.find(samplingQuery).explain());

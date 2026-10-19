@@ -342,6 +342,7 @@ mongo_cc_library(
         ":accumulator_percentile_gen",
         ":map_reduce_options_gen",
         "//src/mongo/db/pipeline/window_function:window_bounds.cpp",
+        "//src/mongo/db/pipeline/window_function:window_function_avg.cpp",
         "//src/mongo/db/pipeline/window_function:window_function_count.cpp",
         "//src/mongo/db/pipeline/window_function:window_function_covariance.cpp",
         "//src/mongo/db/pipeline/window_function:window_function_expression.cpp",
@@ -694,6 +695,21 @@ mongo_cc_library(
         ":stage_params",
         "//src/mongo/db/query:common_query_enums_and_helpers",
         "//src/mongo/db/stats:counters",
+    ],
+)
+
+mongo_cc_unit_test(
+    name = "aggregation_context_fixture_test",
+    srcs = [
+        "aggregation_context_fixture_test.cpp",
+    ],
+    tags = ["mongo_unittest_seventh_group"],
+    deps = [
+        ":aggregation_context_fixture",
+        "//src/mongo/db:service_context_test_fixture",
+        "//src/mongo/db/shard_role",
+        "//src/mongo/db/shard_role/lock_manager",
+        "//src/mongo/unittest",
     ],
 )
 
@@ -1832,6 +1848,7 @@ mongo_cc_benchmark(
     tags = ["query_bm"],
     deps = [
         "change_stream_pipeline",
+        ":document_source_cursor_test_util",
         ":document_source_mock",
         ":expression_context_for_test",
         ":pipeline",
@@ -1921,5 +1938,14 @@ mongo_cc_library(
         ":document_source_mock",
         ":expression_context_for_test",
         ":pipeline",
+    ],
+)
+
+mongo_cc_library(
+    name = "document_source_cursor_test_util",
+    hdrs = ["document_source_cursor_test_util.h"],
+    deps = [
+        ":pipeline",
+        "//src/mongo/db:query_exec",
     ],
 )

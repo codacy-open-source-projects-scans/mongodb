@@ -143,7 +143,7 @@ void beginRetryableWriteWithTxnNumber(
     auto txnParticipant = TransactionParticipant::get(opCtx);
     txnParticipant.beginOrContinue(opCtx,
                                    {*opCtx->getTxnNumber()},
-                                   boost::none /* autocommit */,
+                                   /*autocommit=*/boost::none,
                                    TransactionParticipant::TransactionActions::kNone);
 }
 
@@ -160,7 +160,7 @@ void beginNonRetryableTransactionWithTxnNumber(
     auto txnParticipant = TransactionParticipant::get(opCtx);
     txnParticipant.beginOrContinue(opCtx,
                                    {*opCtx->getTxnNumber()},
-                                   false /* autocommit */,
+                                   /*autocommit=*/false,
                                    TransactionParticipant::TransactionActions::kStart);
 }
 
@@ -177,7 +177,7 @@ void beginRetryableInternalTransactionWithTxnNumber(
     auto txnParticipant = TransactionParticipant::get(opCtx);
     txnParticipant.beginOrContinue(opCtx,
                                    {*opCtx->getTxnNumber()},
-                                   false /* autocommit */,
+                                   /*autocommit=*/false,
                                    TransactionParticipant::TransactionActions::kStart);
 }
 
@@ -268,6 +268,7 @@ protected:
         reset(opCtx.get(), nss1, uuid1);
         reset(opCtx.get(), nss2, uuid2);
         reset(opCtx.get(), nss3, uuid3);
+        reset(opCtx.get(), rridNss, rridUuid);
         reset(opCtx.get(), kNssUnderTenantId, kNssUnderTenantIdUUID);
         reset(opCtx.get(), NamespaceString::kRsOplogNamespace);
     }
@@ -305,7 +306,13 @@ protected:
                 if (nss == implicitlyReplicatedClusteredNss || nss == tempReshardingNss) {
                     opts.clusteredIndex = clustered_util::makeDefaultClusteredIdIndex();
                 }
-                invariant(db->createCollection(opCtx, nss, opts));
+                invariant(db->createCollection(opCtx,
+                                               nss,
+                                               opts,
+                                               /*createDefaultIndexes=*/true,
+                                               /*idIndex=*/BSONObj(),
+                                               /*fromMigrate=*/false,
+                                               /*recordIdsReplicated=*/nss == rridNss));
             }
             wunit.commit();
         });
@@ -576,6 +583,10 @@ protected:
     const NamespaceString nss3 =
         NamespaceString::createNamespaceString_forTest(boost::none, "testDB3", "testColl3");
     const UUID uuid3{UUID::gen()};
+    // A collection that replicates its record ids, so its writes are eligible to carry a hash.
+    const NamespaceString rridNss =
+        NamespaceString::createNamespaceString_forTest(boost::none, "testDB", "rridColl");
+    const UUID rridUuid{UUID::gen()};
     const NamespaceString clusteredNss = NamespaceString::createNamespaceString_forTest(
         TenantId(OID::gen()), "testDB", "clusteredColl");
     // Viewless time-series has no separate buckets namespace: the collection itself holds the
@@ -678,7 +689,7 @@ protected:
         // Simulate catalog information for a normal collection with a standard '_id_' index.
         ASSERT_TRUE(nss.isReplicated());
         auto catalogIdentifier =
-            newCatalogIdentifier(opCtx, nss.dbName(), true /* includeIdIndexIdent */);
+            newCatalogIdentifier(opCtx, nss.dbName(), /*includeIdIndexIdent=*/true);
         CollectionOptions options{.uuid = uuid};
 
         OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
@@ -690,11 +701,12 @@ protected:
             opObserver.onCreateCollection(opCtx,
                                           nss,
                                           options,
+                                          /*idIndex=*/
                                           BSON("v" << 2 << "key" << BSON("_id_" << 1) << "name"
-                                                   << "_id_") /* idIndex */,
+                                                   << "_id_"),
                                           repl::getNextOpTime(opCtx),
                                           catalogIdentifier,
-                                          false /* fromMigrate*/,
+                                          /*fromMigrate=*/false,
                                           viewless);
             wuow.commit();
         }
@@ -719,7 +731,7 @@ protected:
         // Simulate catalog information for a normal collection with a standard '_id_' index.
         ASSERT_TRUE(nss.isReplicated());
         auto catalogIdentifier =
-            newCatalogIdentifier(opCtx, nss.dbName(), true /* includeIdIndexIdent */);
+            newCatalogIdentifier(opCtx, nss.dbName(), /*includeIdIndexIdent=*/true);
         CollectionOptions options{.uuid = uuid};
 
         OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
@@ -731,11 +743,12 @@ protected:
             opObserver.onCreateCollection(opCtx,
                                           nss,
                                           options,
+                                          /*idIndex=*/
                                           BSON("v" << 2 << "key" << BSON("_id_" << 1) << "name"
-                                                   << "_id_") /* idIndex */,
+                                                   << "_id_"),
                                           repl::getNextOpTime(opCtx),
                                           catalogIdentifier,
-                                          false /* fromMigrate*/,
+                                          /*fromMigrate=*/false,
                                           false,
                                           recordIdsReplicated);
             wuow.commit();
@@ -763,7 +776,7 @@ protected:
         // an explicit '_id_' index table.
         ASSERT_TRUE(nss.isReplicated());
         auto catalogIdentifier =
-            newCatalogIdentifier(opCtx, nss.dbName(), false /* includeIdIndexIdent */);
+            newCatalogIdentifier(opCtx, nss.dbName(), /*includeIdIndexIdent=*/false);
         ASSERT_FALSE(catalogIdentifier.idIndexIdent.has_value());
 
         OpObserverImpl opObserver(std::make_unique<OperationLoggerImpl>());
@@ -775,10 +788,10 @@ protected:
             opObserver.onCreateCollection(opCtx,
                                           nss,
                                           clusteredCollectionOptions,
-                                          BSONObj() /* idIndex */,
+                                          /*idIndex=*/BSONObj(),
                                           repl::getNextOpTime(opCtx),
                                           catalogIdentifier,
-                                          false /* fromMigrate*/);
+                                          /*fromMigrate=*/false);
             wuow.commit();
         }
 
@@ -814,8 +827,8 @@ protected:
 
         boost::optional<CreateCollCatalogIdentifier> catalogIdentifier;
         if (isPersistedInLocalCatalog) {
-            catalogIdentifier = newCatalogIdentifier(
-                opCtx.get(), localNSS.dbName(), false /* includeIdIndexIdent */);
+            catalogIdentifier =
+                newCatalogIdentifier(opCtx.get(), localNSS.dbName(), /*includeIdIndexIdent=*/false);
         }
 
         {
@@ -825,10 +838,10 @@ protected:
             opObserver.onCreateCollection(opCtx.get(),
                                           localNSS,
                                           CollectionOptions{},
-                                          BSONObj() /* idIndex */,
-                                          repl::OpTime() /* createOpTime */,
-                                          catalogIdentifier /* createCollCatalogIdentifier */,
-                                          false /* fromMigrate*/);
+                                          /*idIndex=*/BSONObj(),
+                                          /*createOpTime=*/repl::OpTime(),
+                                          /*createCollCatalogIdentifier=*/catalogIdentifier,
+                                          /*fromMigrate=*/false);
             wuow.commit();
         }
 
@@ -838,30 +851,30 @@ protected:
 };
 
 TEST_F(OpObserverOnCreateCollectionTest, BasicReplicatedCatalogIdentifiersEnabled) {
-    testOnCreateCollBasic(true /* catalogReplicationEnabled */);
+    testOnCreateCollBasic(/*catalogReplicationEnabled=*/true);
 }
 TEST_F(OpObserverOnCreateCollectionTest, BasicReplicatedCatalogIdentifiersDisabled) {
-    testOnCreateCollBasic(false /* catalogReplicationEnabled */);
+    testOnCreateCollBasic(/*catalogReplicationEnabled=*/false);
 }
 TEST_F(OpObserverOnCreateCollectionTest,
        BasicReplicatedCatalogIdentifiersEnabledWithTimeseriesParamOff) {
     testOnCreateCollBasic(
-        true /* catalogReplicationEnabled */, true /* viewless */, false /* viewlessParam */);
+        /*catalogReplicationEnabled=*/true, /*viewless=*/true, /*viewlessParam=*/false);
 }
 TEST_F(OpObserverOnCreateCollectionTest,
        BasicReplicatedCatalogIdentifiersDisabledWithTimeseriesParamOff) {
     testOnCreateCollBasic(
-        false /* catalogReplicationEnabled */, true /* viewless */, false /* viewlessParam */);
+        /*catalogReplicationEnabled=*/false, /*viewless=*/true, /*viewlessParam=*/false);
 }
 TEST_F(OpObserverOnCreateCollectionTest,
        BasicReplicatedCatalogIdentifiersEnabledWithTimeseriesParamOn) {
     testOnCreateCollBasic(
-        true /* catalogReplicationEnabled */, true /* viewless */, true /* viewlessParam */);
+        /*catalogReplicationEnabled=*/true, /*viewless=*/true, /*viewlessParam=*/true);
 }
 TEST_F(OpObserverOnCreateCollectionTest,
        BasicReplicatedCatalogIdentifiersDisabledWithTimeseriesParamOn) {
     testOnCreateCollBasic(
-        false /* catalogReplicationEnabled */, true /* viewless */, true /* viewlessParam */);
+        /*catalogReplicationEnabled=*/false, /*viewless=*/true, /*viewlessParam=*/true);
 }
 
 TEST_F(OpObserverOnCreateCollectionTest, createCollectionRecordIdsReplicatedFalse) {
@@ -932,7 +945,7 @@ TEST_F(OpObserverOnCreateCollectionTest,
                                                << "_id_"),
                                       repl::getNextOpTime(opCtx),
                                       catalogIdentifier,
-                                      false /* fromMigrate */,
+                                      /*fromMigrate=*/false,
                                       false,
                                       /*recordIdsReplicated=*/true);
         wuow.commit();
@@ -970,7 +983,7 @@ TEST_F(OpObserverOnCreateCollectionTest,
                                                << "_id_"),
                                       repl::getNextOpTime(opCtx),
                                       catalogIdentifier,
-                                      false /* fromMigrate */,
+                                      /*fromMigrate=*/false,
                                       false,
                                       /*recordIdsReplicated=*/true);
         wuow.commit();
@@ -981,24 +994,24 @@ TEST_F(OpObserverOnCreateCollectionTest,
 }
 
 TEST_F(OpObserverOnCreateCollectionTest, ClusteredReplicatedCatalogIdentifiersEnabled) {
-    testOnCreateCollClustered(true /* catalogReplicationEnabled */);
+    testOnCreateCollClustered(/*catalogReplicationEnabled=*/true);
 }
 TEST_F(OpObserverOnCreateCollectionTest, ClusteredReplicatedCatalogIdentifiersDisabled) {
-    testOnCreateCollClustered(false /* catalogReplicationEnabled */);
+    testOnCreateCollClustered(/*catalogReplicationEnabled=*/false);
 }
 
 TEST_F(OpObserverOnCreateCollectionTest, CatalogIdentifierForUnreplicatedCollection) {
-    testOnCreateUnreplicatedCollection(true /* catalogReplicationEnabled */,
-                                       true /* isPersistedInLocalCatalog */);
-    testOnCreateUnreplicatedCollection(false /* catalogReplicationEnabled */,
-                                       true /* isPersistedInLocalCatalog */);
+    testOnCreateUnreplicatedCollection(/*catalogReplicationEnabled=*/true,
+                                       /*isPersistedInLocalCatalog=*/true);
+    testOnCreateUnreplicatedCollection(/*catalogReplicationEnabled=*/false,
+                                       /*isPersistedInLocalCatalog=*/true);
 }
 
 TEST_F(OpObserverOnCreateCollectionTest, UnreplicatedCollectionNotInLocalCatalog) {
-    testOnCreateUnreplicatedCollection(true /* catalogReplicationEnabled */,
-                                       false /* isPersistedInLocalCatalog */);
-    testOnCreateUnreplicatedCollection(false /* catalogReplicationEnabled */,
-                                       false /* isPersistedInLocalCatalog */);
+    testOnCreateUnreplicatedCollection(/*catalogReplicationEnabled=*/true,
+                                       /*isPersistedInLocalCatalog=*/false);
+    testOnCreateUnreplicatedCollection(/*catalogReplicationEnabled=*/false,
+                                       /*isPersistedInLocalCatalog=*/false);
 }
 
 using OpObserverOnCreateCollectionTestDeathTest = OpObserverOnCreateCollectionTest;
@@ -1019,11 +1032,12 @@ DEATH_TEST_F(OpObserverOnCreateCollectionTestDeathTest,
     opObserver.onCreateCollection(opCtx.get(),
                                   nss,
                                   CollectionOptions{.uuid = UUID::gen()},
+                                  /*idIndex=*/
                                   BSON("v" << 2 << "key" << BSON("_id_" << 1) << "name"
-                                           << "_id_") /* idIndex */,
+                                           << "_id_"),
                                   repl::getNextOpTime(opCtx.get()),
-                                  boost::none /* createCollCatalogIdentifier */,
-                                  false /* fromMigrate*/);
+                                  /*createCollCatalogIdentifier=*/boost::none,
+                                  /*fromMigrate=*/false);
     wuow.commit();
 }
 
@@ -1041,7 +1055,7 @@ TEST_F(OpObserverTest, StartIndexBuildExpectedOplogEntry) {
         AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
         WriteUnitOfWork wunit(opCtx.get());
         opObserver.onStartIndexBuild(
-            opCtx.get(), nss, uuid, indexBuildUUID, indexes, false /*fromMigrate*/);
+            opCtx.get(), nss, uuid, indexBuildUUID, indexes, /*fromMigrate=*/false);
         wunit.commit();
     }
 
@@ -1075,21 +1089,21 @@ TEST_F(OpObserverTest, CommitIndexBuildExpectedOplogEntry) {
         AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
         WriteUnitOfWork wunit(opCtx.get());
         opObserver.onCommitIndexBuild(
-            opCtx.get(), nss, uuid, indexBuildUUID, indexes, {}, false /*fromMigrate*/);
+            opCtx.get(), nss, uuid, indexBuildUUID, indexes, {}, /*fromMigrate=*/false);
         opObserver.onCommitIndexBuild(opCtx.get(),
                                       nss,
                                       uuid,
                                       indexBuildUUID,
                                       indexes,
                                       {boost::none, BSON("a" << "value")},
-                                      false /*fromMigrate*/);
+                                      /*fromMigrate=*/false);
         ASSERT_THROWS_CODE(opObserver.onCommitIndexBuild(opCtx.get(),
                                                          nss,
                                                          uuid,
                                                          indexBuildUUID,
                                                          indexes,
                                                          {boost::none},
-                                                         false /*fromMigrate*/),
+                                                         /*fromMigrate=*/false),
                            DBException,
                            11084600);
         ASSERT_THROWS_CODE(opObserver.onCommitIndexBuild(opCtx.get(),
@@ -1098,7 +1112,7 @@ TEST_F(OpObserverTest, CommitIndexBuildExpectedOplogEntry) {
                                                          indexBuildUUID,
                                                          indexes,
                                                          {boost::none, boost::none, boost::none},
-                                                         false /*fromMigrate*/),
+                                                         /*fromMigrate=*/false),
                            DBException,
                            11084600);
         wunit.commit();
@@ -1499,7 +1513,7 @@ TEST_F(OpObserverTest, OnRenameCollectionReturnsRenameOpTime) {
                                       0U,
                                       stayTemp,
                                       /*markFromMigrate=*/false,
-                                      /*isTimeseries*/ false);
+                                      /*isTimeseries=*/false);
         renameOpTime = OpObserver::Times::get(opCtx.get()).reservedOpTimes.front();
         wunit.commit();
     }
@@ -1543,7 +1557,7 @@ TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOff) {
                                       0U,
                                       stayTemp,
                                       /*markFromMigrate=*/false,
-                                      /*isTimeseries*/ false);
+                                      /*isTimeseries=*/false);
         wunit.commit();
     }
 
@@ -1587,7 +1601,7 @@ TEST_F(OpObserverTest, OnRenameCollectionIncludesTenantIdFeatureFlagOn) {
                                       0U,
                                       stayTemp,
                                       /*markFromMigrate=*/false,
-                                      /*isTimeseries*/ false);
+                                      /*isTimeseries=*/false);
         wunit.commit();
     }
 
@@ -1628,7 +1642,7 @@ TEST_F(OpObserverTest, OnRenameCollectionOmitsDropTargetFieldIfDropTargetUuidIsN
                                       0U,
                                       stayTemp,
                                       /*markFromMigrate=*/false,
-                                      /*isTimeseries*/ false);
+                                      /*isTimeseries=*/false);
         wunit.commit();
     }
 
@@ -1683,7 +1697,7 @@ TEST_F(OpObserverTest, ImportCollectionOplogEntry) {
                                       catalogEntry,
                                       storageMetadata,
                                       isDryRun,
-                                      /*isTimeseries*/ false);
+                                      /*isTimeseries=*/false);
         wunit.commit();
     }
 
@@ -1726,7 +1740,7 @@ TEST_F(OpObserverTest, ImportCollectionOplogEntryIncludesTenantId) {
                                       catalogEntry,
                                       storageMetadata,
                                       isDryRun,
-                                      /*isTimeseries*/ false);
+                                      /*isTimeseries=*/false);
         wunit.commit();
     }
 
@@ -1933,11 +1947,25 @@ TEST_F(OpObserverTest, CheckHashExistsOnInsertWithFlagAndRecordId) {
     auto opCtxWrapper = cc().makeOperationContext();
     OperationContext* opCtx = opCtxWrapper.get();
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
-    const auto sizeMetadata = insertAndGetSizeMetadata(opCtx, nss, doc, {RecordId(1)});
+    const auto sizeMetadata = insertAndGetSizeMetadata(opCtx, rridNss, doc, {RecordId(1)});
     ASSERT(sizeMetadata);
     ASSERT(sizeMetadata->getH());
     EXPECT_EQ(*sizeMetadata->getH(), repl::computeDocValidationHash(doc));
     EXPECT_FALSE(sizeMetadata->getSz().has_value());
+}
+
+// The override only skips verification on the applier, so the hash is still emitted.
+TEST_F(OpObserverTest, CheckHashExistsOnInsertWithValidationOverride) {
+    unittest::ServerParameterGuard continuousInternodeScope{
+        "featureFlagContinuousInternodeValidationPerDocument", true};
+    unittest::ServerParameterGuard disableValidation{"disableContinuousInternodeValidation", true};
+    auto opCtxWrapper = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxWrapper.get();
+    const BSONObj doc = BSON("_id" << 0 << "data" << "x");
+    const auto sizeMetadata = insertAndGetSizeMetadata(opCtx, rridNss, doc, {RecordId(1)});
+    ASSERT(sizeMetadata);
+    ASSERT(sizeMetadata->getH());
+    EXPECT_EQ(*sizeMetadata->getH(), repl::computeDocValidationHash(doc));
 }
 
 TEST_F(OpObserverTest, CheckHashMatchesItsOwnDocumentOnMultiDocumentInsert) {
@@ -1949,7 +1977,7 @@ TEST_F(OpObserverTest, CheckHashMatchesItsOwnDocumentOnMultiDocumentInsert) {
                                        BSON("_id" << 1 << "data" << "yy"),
                                        BSON("_id" << 2 << "data" << "zzz")};
     const auto sizeMetadata =
-        insertManyAndGetSizeMetadata(opCtx, nss, docs, {RecordId(1), RecordId(2), RecordId(3)});
+        insertManyAndGetSizeMetadata(opCtx, rridNss, docs, {RecordId(1), RecordId(2), RecordId(3)});
     ASSERT_EQ(sizeMetadata.size(), docs.size());
     for (size_t i = 0; i < docs.size(); i++) {
         ASSERT(sizeMetadata[i]) << "no size metadata for document " << i;
@@ -1958,7 +1986,7 @@ TEST_F(OpObserverTest, CheckHashMatchesItsOwnDocumentOnMultiDocumentInsert) {
     }
 }
 
-TEST_F(OpObserverTest, CheckHashDoesNotExistOnInsertWithoutRecordId) {
+TEST_F(OpObserverTest, CheckHashDoesNotExistOnInsertWithoutReplicatedRecordIds) {
     unittest::ServerParameterGuard continuousInternodeScope{
         "featureFlagContinuousInternodeValidationPerDocument", true};
     auto opCtxWrapper = cc().makeOperationContext();
@@ -1967,11 +1995,22 @@ TEST_F(OpObserverTest, CheckHashDoesNotExistOnInsertWithoutRecordId) {
     EXPECT_FALSE(insertAndGetSizeMetadata(opCtx, nss, doc, {}).has_value());
 }
 
+// Hash emission follows the collection, not whether the write happened to pass a record id.
+TEST_F(OpObserverTest, CheckHashDoesNotExistOnInsertWithRecordIdWithoutReplicatedRecordIds) {
+    unittest::ServerParameterGuard continuousInternodeScope{
+        "featureFlagContinuousInternodeValidationPerDocument", true};
+    auto opCtxWrapper = cc().makeOperationContext();
+    OperationContext* opCtx = opCtxWrapper.get();
+    const BSONObj doc = BSON("_id" << 0 << "data" << "x");
+    const auto sizeMetadata = insertAndGetSizeMetadata(opCtx, nss, doc, {RecordId(1)});
+    EXPECT_FALSE(sizeMetadata && sizeMetadata->getH());
+}
+
 TEST_F(OpObserverTest, CheckHashDoesNotExistOnInsertWithoutFlag) {
     auto opCtxWrapper = cc().makeOperationContext();
     OperationContext* opCtx = opCtxWrapper.get();
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
-    EXPECT_FALSE(insertAndGetSizeMetadata(opCtx, nss, doc, {RecordId(1)}).has_value());
+    EXPECT_FALSE(insertAndGetSizeMetadata(opCtx, rridNss, doc, {RecordId(1)}).has_value());
 }
 
 TEST_F(OpObserverTest, CheckHashExistsOnUpdateWithFlagAndRecordId) {
@@ -1979,8 +2018,13 @@ TEST_F(OpObserverTest, CheckHashExistsOnUpdateWithFlagAndRecordId) {
         "featureFlagContinuousInternodeValidationPerDocument", true};
     auto opCtxWrapper = cc().makeOperationContext();
     OperationContext* opCtx = opCtxWrapper.get();
-    const auto sizeMetadata = updateAndGetSizeMetadata(
-        opCtx, nss, kPreImageDoc, kUpdate, kUpdatedDoc, RecordId(1), /*replicatedSizeDelta=*/{});
+    const auto sizeMetadata = updateAndGetSizeMetadata(opCtx,
+                                                       rridNss,
+                                                       kPreImageDoc,
+                                                       kUpdate,
+                                                       kUpdatedDoc,
+                                                       RecordId(1),
+                                                       /*replicatedSizeDelta=*/{});
     ASSERT(sizeMetadata);
     ASSERT(sizeMetadata->getH());
     EXPECT_EQ(*sizeMetadata->getH(), repl::computeUpdateValidationHash(kPreImageDoc, kUpdatedDoc));
@@ -1990,12 +2034,12 @@ TEST_F(OpObserverTest, CheckHashExistsOnUpdateWithFlagAndRecordId) {
 TEST_F(OpObserverTest, CheckHashDoesNotExistOnUpdateWithoutFlag) {
     auto opCtxWrapper = cc().makeOperationContext();
     OperationContext* opCtx = opCtxWrapper.get();
-    EXPECT_FALSE(
-        updateAndGetSizeMetadata(opCtx, nss, kPreImageDoc, kUpdate, kUpdatedDoc, RecordId(1), {})
-            .has_value());
+    EXPECT_FALSE(updateAndGetSizeMetadata(
+                     opCtx, rridNss, kPreImageDoc, kUpdate, kUpdatedDoc, RecordId(1), {})
+                     .has_value());
 }
 
-TEST_F(OpObserverTest, CheckHashDoesNotExistOnUpdateWithoutRecordId) {
+TEST_F(OpObserverTest, CheckHashDoesNotExistOnUpdateWithoutReplicatedRecordIds) {
     unittest::ServerParameterGuard continuousInternodeScope{
         "featureFlagContinuousInternodeValidationPerDocument", true};
     auto opCtxWrapper = cc().makeOperationContext();
@@ -2012,14 +2056,14 @@ TEST_F(OpObserverTest, CheckHashExistsOnDeleteWithFlagAndRecordId) {
     OperationContext* opCtx = opCtxWrapper.get();
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
     const auto sizeMetadata =
-        deleteAndGetSizeMetadata(opCtx, nss, doc, RecordId(1), /*replicatedSizeDelta=*/{});
+        deleteAndGetSizeMetadata(opCtx, rridNss, doc, RecordId(1), /*replicatedSizeDelta=*/{});
     ASSERT(sizeMetadata);
     ASSERT(sizeMetadata->getH());
     EXPECT_EQ(*sizeMetadata->getH(), repl::computeDocValidationHash(doc));
     EXPECT_FALSE(sizeMetadata->getSz().has_value());
 }
 
-TEST_F(OpObserverTest, CheckHashDoesNotExistOnDeleteWithoutRecordId) {
+TEST_F(OpObserverTest, CheckHashDoesNotExistOnDeleteWithoutReplicatedRecordIds) {
     unittest::ServerParameterGuard continuousInternodeScope{
         "featureFlagContinuousInternodeValidationPerDocument", true};
     auto opCtxWrapper = cc().makeOperationContext();
@@ -2032,7 +2076,7 @@ TEST_F(OpObserverTest, CheckHashDoesNotExistOnDeleteWithoutFlag) {
     auto opCtxWrapper = cc().makeOperationContext();
     OperationContext* opCtx = opCtxWrapper.get();
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
-    EXPECT_FALSE(deleteAndGetSizeMetadata(opCtx, nss, doc, RecordId(1), {}).has_value());
+    EXPECT_FALSE(deleteAndGetSizeMetadata(opCtx, rridNss, doc, RecordId(1), {}).has_value());
 }
 
 // A clustered collection has no replicated record ids, but the applier can derive its record ids
@@ -2248,7 +2292,7 @@ TEST_F(OpObserverTest, CheckSizeAndHashExistTogetherOnInsert) {
     auto opCtxWrapper = cc().makeOperationContext();
     OperationContext* opCtx = opCtxWrapper.get();
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
-    const auto sizeMetadata = insertAndGetSizeMetadata(opCtx, nss, doc, {RecordId(1)});
+    const auto sizeMetadata = insertAndGetSizeMetadata(opCtx, rridNss, doc, {RecordId(1)});
     ASSERT(sizeMetadata);
     ASSERT(sizeMetadata->getSz());
     EXPECT_EQ(*sizeMetadata->getSz(), doc.objsize());
@@ -2261,8 +2305,13 @@ TEST_F(OpObserverTest, CheckSizeAndHashExistTogetherOnUpdate) {
         "featureFlagContinuousInternodeValidationPerDocument", true};
     auto opCtxWrapper = cc().makeOperationContext();
     OperationContext* opCtx = opCtxWrapper.get();
-    const auto sizeMetadata = updateAndGetSizeMetadata(
-        opCtx, nss, kPreImageDoc, kUpdate, kUpdatedDoc, RecordId(1), /*replicatedSizeDelta=*/10);
+    const auto sizeMetadata = updateAndGetSizeMetadata(opCtx,
+                                                       rridNss,
+                                                       kPreImageDoc,
+                                                       kUpdate,
+                                                       kUpdatedDoc,
+                                                       RecordId(1),
+                                                       /*replicatedSizeDelta=*/10);
     ASSERT(sizeMetadata);
     ASSERT(sizeMetadata->getSz());
     EXPECT_EQ(*sizeMetadata->getSz(), 10);
@@ -2277,7 +2326,7 @@ TEST_F(OpObserverTest, CheckSizeAndHashExistTogetherOnDelete) {
     OperationContext* opCtx = opCtxWrapper.get();
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
     const auto sizeMetadata =
-        deleteAndGetSizeMetadata(opCtx, nss, doc, RecordId(1), /*replicatedSizeDelta=*/10);
+        deleteAndGetSizeMetadata(opCtx, rridNss, doc, RecordId(1), /*replicatedSizeDelta=*/10);
     ASSERT(sizeMetadata);
     ASSERT(sizeMetadata->getSz());
     EXPECT_EQ(*sizeMetadata->getSz(), 10);
@@ -2307,7 +2356,7 @@ public:
                               StmtId stmtId) {
         txnParticipant.beginOrContinue(opCtx,
                                        {txnNum},
-                                       boost::none /* autocommit */,
+                                       /*autocommit=*/boost::none,
                                        TransactionParticipant::TransactionActions::kNone);
 
         {
@@ -2672,7 +2721,7 @@ TEST_F(OpObserverTransactionTest, CheckHashExistsOnTransactionInsertWithFlagAndR
         "featureFlagContinuousInternodeValidationPerDocument", true};
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
     const int64_t expectedHash = repl::computeDocValidationHash(doc);
-    const auto sizeMetadata = txnInsertAndGetSizeMetadata(nss1, doc, {RecordId(1)});
+    const auto sizeMetadata = txnInsertAndGetSizeMetadata(rridNss, doc, {RecordId(1)});
     ASSERT(sizeMetadata);
     ASSERT(sizeMetadata->getH());
     EXPECT_EQ(*sizeMetadata->getH(), expectedHash);
@@ -2681,10 +2730,11 @@ TEST_F(OpObserverTransactionTest, CheckHashExistsOnTransactionInsertWithFlagAndR
 
 TEST_F(OpObserverTransactionTest, CheckHashDoesNotExistOnTransactionInsertWithoutFlag) {
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
-    EXPECT_FALSE(txnInsertAndGetSizeMetadata(nss1, doc, {RecordId(1)}).has_value());
+    EXPECT_FALSE(txnInsertAndGetSizeMetadata(rridNss, doc, {RecordId(1)}).has_value());
 }
 
-TEST_F(OpObserverTransactionTest, CheckHashDoesNotExistOnTransactionInsertWithoutRecordId) {
+TEST_F(OpObserverTransactionTest,
+       CheckHashDoesNotExistOnTransactionInsertWithoutReplicatedRecordIds) {
     unittest::ServerParameterGuard continuousInternodeScope{
         "featureFlagContinuousInternodeValidationPerDocument", true};
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
@@ -2696,7 +2746,7 @@ TEST_F(OpObserverTransactionTest, CheckHashExistsOnTransactionUpdateWithFlagAndR
         "featureFlagContinuousInternodeValidationPerDocument", true};
     const int64_t expectedHash = repl::computeUpdateValidationHash(kPreImageDoc, kUpdatedDoc);
     const auto sizeMetadata =
-        txnUpdateAndGetSizeMetadata(nss1, kPreImageDoc, kUpdatedDoc, RecordId(1));
+        txnUpdateAndGetSizeMetadata(rridNss, kPreImageDoc, kUpdatedDoc, RecordId(1));
     ASSERT(sizeMetadata);
     ASSERT(sizeMetadata->getH());
     EXPECT_EQ(*sizeMetadata->getH(), expectedHash);
@@ -2705,10 +2755,11 @@ TEST_F(OpObserverTransactionTest, CheckHashExistsOnTransactionUpdateWithFlagAndR
 
 TEST_F(OpObserverTransactionTest, CheckHashDoesNotExistOnTransactionUpdateWithoutFlag) {
     EXPECT_FALSE(
-        txnUpdateAndGetSizeMetadata(nss1, kPreImageDoc, kUpdatedDoc, RecordId(1)).has_value());
+        txnUpdateAndGetSizeMetadata(rridNss, kPreImageDoc, kUpdatedDoc, RecordId(1)).has_value());
 }
 
-TEST_F(OpObserverTransactionTest, CheckHashDoesNotExistOnTransactionUpdateWithoutRecordId) {
+TEST_F(OpObserverTransactionTest,
+       CheckHashDoesNotExistOnTransactionUpdateWithoutReplicatedRecordIds) {
     unittest::ServerParameterGuard continuousInternodeScope{
         "featureFlagContinuousInternodeValidationPerDocument", true};
     EXPECT_FALSE(
@@ -2720,7 +2771,7 @@ TEST_F(OpObserverTransactionTest, CheckHashExistsOnTransactionDeleteWithFlagAndR
         "featureFlagContinuousInternodeValidationPerDocument", true};
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
     const int64_t expectedHash = repl::computeDocValidationHash(doc);
-    const auto sizeMetadata = txnDeleteAndGetSizeMetadata(nss1, doc, RecordId(1));
+    const auto sizeMetadata = txnDeleteAndGetSizeMetadata(rridNss, doc, RecordId(1));
     ASSERT(sizeMetadata);
     ASSERT(sizeMetadata->getH());
     EXPECT_EQ(*sizeMetadata->getH(), expectedHash);
@@ -2729,10 +2780,11 @@ TEST_F(OpObserverTransactionTest, CheckHashExistsOnTransactionDeleteWithFlagAndR
 
 TEST_F(OpObserverTransactionTest, CheckHashDoesNotExistOnTransactionDeleteWithoutFlag) {
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
-    EXPECT_FALSE(txnDeleteAndGetSizeMetadata(nss1, doc, RecordId(1)).has_value());
+    EXPECT_FALSE(txnDeleteAndGetSizeMetadata(rridNss, doc, RecordId(1)).has_value());
 }
 
-TEST_F(OpObserverTransactionTest, CheckHashDoesNotExistOnTransactionDeleteWithoutRecordId) {
+TEST_F(OpObserverTransactionTest,
+       CheckHashDoesNotExistOnTransactionDeleteWithoutReplicatedRecordIds) {
     unittest::ServerParameterGuard continuousInternodeScope{
         "featureFlagContinuousInternodeValidationPerDocument", true};
     const BSONObj doc = BSON("_id" << 0 << "data" << "x");
@@ -3573,7 +3625,7 @@ public:
 protected:
     void testRetryableFindAndModifyUpdateRequestingPostImageHasNeedsRetryImage() {
         NamespaceString nss = NamespaceString::createNamespaceString_forTest(
-            boost::none /* tenantId */, "test", "coll");
+            /*tenantId=*/boost::none, "test", "coll");
         const auto criteria = BSON("_id" << 0);
         const auto preImageDoc = criteria;
         CollectionUpdateArgs updateArgs{preImageDoc};
@@ -4463,7 +4515,7 @@ TEST_F(BatchedWriteOutputsTest, RetryableWriteWithPdibGroupsAtomically) {
     resetOplogAndTransactions(opCtx);
 
     std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
-    beginRetryableWriteWithTxnNumber(opCtx, 0 /*txnNumber*/, contextSession);
+    beginRetryableWriteWithTxnNumber(opCtx, /*txnNumber=*/0, contextSession);
 
     // Two ops so the batch produces an applyOps rather than the single-op fast path.
     std::vector<InsertStatement> toInsert;
@@ -4922,7 +4974,7 @@ TEST_F(BatchedWriteOutputsTest, RetryableAtomicWriteEmitsAppliedAtomicallyTag) {
     resetOplogAndTransactions(opCtx);
 
     std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
-    beginRetryableWriteWithTxnNumber(opCtx, 0 /*txnNumber*/, contextSession);
+    beginRetryableWriteWithTxnNumber(opCtx, /*txnNumber=*/0, contextSession);
 
     // Two ops so the batch produces an applyOps rather than the single-op fast path; one carries a
     // statement id, one doesn't (a kUninitializedStmtId insert yields an op with no statement ids).
@@ -4989,7 +5041,7 @@ TEST_F(BatchedWriteOutputsTest, RetryableAtomicWriteChainTagsAndLinksEveryEntry)
     resetOplogAndTransactions(opCtx);
 
     std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
-    beginRetryableWriteWithTxnNumber(opCtx, 0 /*txnNumber*/, contextSession);
+    beginRetryableWriteWithTxnNumber(opCtx, /*txnNumber=*/0, contextSession);
 
     // One retryable insert plus stmtId-less inserts; with the count limit at 1, each op lands in
     // its own applyOps entry, forming a chain.
@@ -5046,7 +5098,7 @@ TEST_F(BatchedWriteOutputsTest, RetryableAtomicWriteChainLinksAcrossStatements) 
     resetOplogAndTransactions(opCtx);
 
     std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
-    beginRetryableWriteWithTxnNumber(opCtx, 0 /*txnNumber*/, contextSession);
+    beginRetryableWriteWithTxnNumber(opCtx, /*txnNumber=*/0, contextSession);
 
     // One statement's inserts in a WUOW; only the first carries a statement id, as a real
     // retryable statement's internal ops would.
@@ -5070,8 +5122,8 @@ TEST_F(BatchedWriteOutputsTest, RetryableAtomicWriteChainLinksAcrossStatements) 
     };
 
     // Statement 0 fits in one applyOps entry; statement 1 needs two.
-    runStatement(StmtId(0), 0 /*firstDocId*/, 2 /*numOps*/);
-    runStatement(StmtId(1), 10 /*firstDocId*/, 4 /*numOps*/);
+    runStatement(StmtId(0), /*firstDocId=*/0, /*numOps=*/2);
+    runStatement(StmtId(1), /*firstDocId=*/10, /*numOps=*/4);
 
     auto oplogs = getNOplogEntries(opCtx, 3);
     auto stmt0 = assertGet(OplogEntry::parse(oplogs[0]));
@@ -5481,7 +5533,7 @@ TEST_F(BatchedWriteOutputsTest, RetryableSessionAtomicBatchWithoutStatementIdsIs
     resetOplogAndTransactions(opCtx);
 
     std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
-    beginRetryableWriteWithTxnNumber(opCtx, 0 /*txnNumber*/, contextSession);
+    beginRetryableWriteWithTxnNumber(opCtx, /*txnNumber=*/0, contextSession);
 
     // Two ops with no statement ids, so the batch is a multi-op applyOps (not the single-op fast
     // path) and carries no retryable statements despite running within a retryable write.
@@ -5531,7 +5583,7 @@ TEST_F(BatchedWriteOutputsTest, NonRetryableSingleOpAtomicBatchDoesNotWriteTxnRe
         resetOplogAndTransactions(opCtx);
 
         std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
-        beginRetryableWriteWithTxnNumber(opCtx, 0 /*txnNumber*/, contextSession);
+        beginRetryableWriteWithTxnNumber(opCtx, /*txnNumber=*/0, contextSession);
         const auto sessionId = *opCtx->getLogicalSessionId();
 
         const auto doc = BSON("_id" << 0);
@@ -5584,7 +5636,7 @@ TEST_F(BatchedWriteOutputsTest, NonRetryableMultiOpBatchDoesNotWriteTxnRecord) {
         resetOplogAndTransactions(opCtx);
 
         std::unique_ptr<MongoDSessionCatalog::Session> contextSession;
-        beginRetryableWriteWithTxnNumber(opCtx, 0 /*txnNumber*/, contextSession);
+        beginRetryableWriteWithTxnNumber(opCtx, /*txnNumber=*/0, contextSession);
         const auto sessionId = *opCtx->getLogicalSessionId();
 
         std::vector<InsertStatement> toInsert;
@@ -5856,7 +5908,7 @@ TEST_F(BatchedWriteOutputsTest, ApplyOpsChainsMetricIncrementsOnRetryableAtomicW
     resetOplogAndTransactions(opCtx);
 
     std::unique_ptr<MongoDSessionCatalog::Session> session;
-    beginRetryableWriteWithTxnNumber(opCtx, 0 /*txnNumber*/, session);
+    beginRetryableWriteWithTxnNumber(opCtx, /*txnNumber=*/0, session);
 
     {
         AutoGetCollection autoColl(opCtx, _nss, MODE_IX);
@@ -6215,7 +6267,7 @@ TEST_P(BatchedWriteOutputsTest, TestSingleInsertIsNotInApplyOps) {
                 /*fromMigrate=*/std::vector<bool>(inserts.size(), false),
                 /*defaultFromMigrate=*/false);
         },
-        GetParam() /*isRetryable*/);
+        /*isRetryable=*/GetParam());
 }
 
 TEST_P(BatchedWriteOutputsTest, TestSingleDeleteIsNotInApplyOps) {
@@ -6225,7 +6277,7 @@ TEST_P(BatchedWriteOutputsTest, TestSingleDeleteIsNotInApplyOps) {
             opCtx->getServiceContext()->getOpObserver()->onDelete(
                 opCtx, *autoColl, stmtId, doc, getDocumentKey(*autoColl, doc), {});
         },
-        GetParam() /*isRetryable*/);
+        /*isRetryable=*/GetParam());
 }
 
 TEST_P(BatchedWriteOutputsTest, TestSingleUpdateIsNotInApplyOps) {
@@ -6246,7 +6298,7 @@ TEST_P(BatchedWriteOutputsTest, TestSingleUpdateIsNotInApplyOps) {
 
             opCtx->getServiceContext()->getOpObserver()->onUpdate(opCtx, update);
         },
-        GetParam() /*isRetryable*/);
+        /*isRetryable=*/GetParam());
 }
 
 TEST_F(BatchedWriteOutputsTest, TestSingleContainerInsertIsNotInApplyOps) {
@@ -6258,7 +6310,7 @@ TEST_F(BatchedWriteOutputsTest, TestSingleContainerInsertIsNotInApplyOps) {
             opCtx->getServiceContext()->getOpObserver()->onContainerInsert(
                 opCtx, ident, key, value);
         },
-        false /*isRetryable*/);
+        /*isRetryable=*/false);
 }
 
 TEST_F(BatchedWriteOutputsTest, TestSingleContainerDeleteIsNotInApplyOps) {
@@ -6269,7 +6321,7 @@ TEST_F(BatchedWriteOutputsTest, TestSingleContainerDeleteIsNotInApplyOps) {
 
             opCtx->getServiceContext()->getOpObserver()->onContainerDelete(opCtx, ident, key);
         },
-        false /*isRetryable*/);
+        /*isRetryable=*/false);
 }
 
 repl::OplogEntry BatchedWriteOutputsTest::commitBatchedInserts(
@@ -6559,7 +6611,7 @@ TEST_F(BatchedWriteOutputsTest, CheckHashExistsOnBatchedInsertWithFlagAndRecordI
     const int64_t expectedHash2 = repl::computeDocValidationHash(doc2);
 
     const auto sizeMetadata =
-        batchedInsertAndGetSizeMetadata(opCtx, _nss, doc1, doc2, {RecordId(1), RecordId(2)});
+        batchedInsertAndGetSizeMetadata(opCtx, rridNss, doc1, doc2, {RecordId(1), RecordId(2)});
     ASSERT(sizeMetadata.first);
     ASSERT(sizeMetadata.first->getH());
     EXPECT_EQ(*sizeMetadata.first->getH(), expectedHash1);
@@ -6577,12 +6629,12 @@ TEST_F(BatchedWriteOutputsTest, CheckHashDoesNotExistOnBatchedInsertWithoutFlag)
     const BSONObj doc1 = BSON("_id" << 0 << "data" << "x");
     const BSONObj doc2 = BSON("_id" << 1 << "data" << "y");
     const auto sizeMetadata =
-        batchedInsertAndGetSizeMetadata(opCtx, _nss, doc1, doc2, {RecordId(1), RecordId(2)});
+        batchedInsertAndGetSizeMetadata(opCtx, rridNss, doc1, doc2, {RecordId(1), RecordId(2)});
     EXPECT_FALSE(sizeMetadata.first.has_value());
     EXPECT_FALSE(sizeMetadata.second.has_value());
 }
 
-TEST_F(BatchedWriteOutputsTest, CheckHashDoesNotExistOnBatchedInsertWithoutRecordIds) {
+TEST_F(BatchedWriteOutputsTest, CheckHashDoesNotExistOnBatchedInsertWithoutReplicatedRecordIds) {
     unittest::ServerParameterGuard continuousInternodeScope{
         "featureFlagContinuousInternodeValidationPerDocument", true};
     auto opCtxRaii = cc().makeOperationContext();
@@ -6607,7 +6659,7 @@ TEST_F(BatchedWriteOutputsTest, CheckHashExistsOnBatchedUpdateWithFlagAndRecordI
     const int64_t expectedHash1 = repl::computeUpdateValidationHash(preImageDoc1, updatedDoc1);
     const int64_t expectedHash2 = repl::computeUpdateValidationHash(preImageDoc2, updatedDoc2);
     const auto sizeMetadata = batchedUpdateAndGetSizeMetadata(opCtx,
-                                                              _nss,
+                                                              rridNss,
                                                               preImageDoc1,
                                                               updatedDoc1,
                                                               preImageDoc2,
@@ -6631,12 +6683,12 @@ TEST_F(BatchedWriteOutputsTest, CheckHashDoesNotExistOnBatchedUpdateWithoutFlag)
     const BSONObj doc1 = BSON("_id" << 0 << "data" << "x");
     const BSONObj doc2 = BSON("_id" << 1 << "data" << 1);
     const auto sizeMetadata = batchedUpdateAndGetSizeMetadata(
-        opCtx, _nss, doc1, doc1, doc2, doc2, RecordId(1), RecordId(2));
+        opCtx, rridNss, doc1, doc1, doc2, doc2, RecordId(1), RecordId(2));
     EXPECT_FALSE(sizeMetadata.first.has_value());
     EXPECT_FALSE(sizeMetadata.second.has_value());
 }
 
-TEST_F(BatchedWriteOutputsTest, CheckHashDoesNotExistOnBatchedUpdateWithoutRecordId) {
+TEST_F(BatchedWriteOutputsTest, CheckHashDoesNotExistOnBatchedUpdateWithoutReplicatedRecordIds) {
     unittest::ServerParameterGuard continuousInternodeScope{
         "featureFlagContinuousInternodeValidationPerDocument", true};
     auto opCtxRaii = cc().makeOperationContext();
@@ -6661,7 +6713,7 @@ TEST_F(BatchedWriteOutputsTest, CheckHashExistsOnBatchedDeleteWithFlagAndRecordI
     const int64_t expectedHash2 = repl::computeDocValidationHash(doc2);
 
     const auto sizeMetadata =
-        batchedDeleteAndGetSizeMetadata(opCtx, _nss, doc1, doc2, RecordId(1), RecordId(2));
+        batchedDeleteAndGetSizeMetadata(opCtx, rridNss, doc1, doc2, RecordId(1), RecordId(2));
     ASSERT(sizeMetadata.first);
     ASSERT(sizeMetadata.first->getH());
     EXPECT_EQ(*sizeMetadata.first->getH(), expectedHash1);
@@ -6679,12 +6731,12 @@ TEST_F(BatchedWriteOutputsTest, CheckHashDoesNotExistOnBatchedDeleteWithoutFlag)
     const BSONObj doc1 = BSON("_id" << 0 << "data" << "x");
     const BSONObj doc2 = BSON("_id" << 1 << "data" << "y");
     const auto sizeMetadata =
-        batchedDeleteAndGetSizeMetadata(opCtx, _nss, doc1, doc2, RecordId(1), RecordId(2));
+        batchedDeleteAndGetSizeMetadata(opCtx, rridNss, doc1, doc2, RecordId(1), RecordId(2));
     EXPECT_FALSE(sizeMetadata.first.has_value());
     EXPECT_FALSE(sizeMetadata.second.has_value());
 }
 
-TEST_F(BatchedWriteOutputsTest, CheckHashDoesNotExistOnBatchedDeleteWithoutRecordId) {
+TEST_F(BatchedWriteOutputsTest, CheckHashDoesNotExistOnBatchedDeleteWithoutReplicatedRecordIds) {
     unittest::ServerParameterGuard continuousInternodeScope{
         "featureFlagContinuousInternodeValidationPerDocument", true};
     auto opCtxRaii = cc().makeOperationContext();
@@ -7833,7 +7885,7 @@ TEST_F(OpObserverTest, MagicRestoreNoOplog) {
         AutoGetDb autoDb(opCtx.get(), nss.dbName(), MODE_X);
         WriteUnitOfWork wunit(opCtx.get());
         opObserver.onStartIndexBuild(
-            opCtx.get(), nss, uuid, indexBuildUUID, indexes, false /*fromMigrate*/);
+            opCtx.get(), nss, uuid, indexBuildUUID, indexes, /*fromMigrate=*/false);
         wunit.commit();
     }
 

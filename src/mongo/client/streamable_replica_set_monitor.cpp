@@ -434,7 +434,7 @@ boost::optional<std::vector<HostAndPort>> StreamableReplicaSetMonitor::_getHosts
 
 HostAndPort StreamableReplicaSetMonitor::getPrimaryOrUassert() {
     return getHostOrRefresh(kPrimaryOnlyReadPreference,
-                            {} /* targetingMetadata */,
+                            /*targetingMetadata=*/{},
                             CancellationToken::uncancelable())
         .get();
 }
@@ -650,6 +650,23 @@ void StreamableReplicaSetMonitor::onTopologyDescriptionChangedEvent(
     std::unique_lock<ObservableMutex<std::mutex>> lock(_mutex);
     if (_isDropped.load())
         return;
+
+    // Drop connections for hidden or removed members
+    for (const auto& server : previousDescription->getServers()) {
+        const auto& address = server->getAddress();
+        if (newDescription->findServerByAddress(address)) {
+            continue;
+        }
+
+        LOGV2(13617800,
+              "Dropping ReplicaSetMonitor connections to host removed from the topology",
+              "replicaSet"_attr = getName(),
+              "host"_attr = address);
+        _connectionManager->dropConnections(
+            address,
+            Status(ErrorCodes::PooledConnectionsDropped,
+                   "Host was removed from the replica set topology"));
+    }
 
     // Notify external components if there are membership changes in the topology.
     if (hasMembershipChange(previousDescription, newDescription)) {

@@ -589,28 +589,11 @@ TEST_F(ProviderDrivenValidationTest, PerCollectionEnabledByProviderWithoutFeatur
     EXPECT_TRUE(isContinuousInternodeValidationPerCollectionEnabled(_opCtx.get()));
 }
 
-// The override is the mitigation lever, so it has to win against a provider that mandates
-// validation, which is the only way validation is on in production.
-TEST_F(ProviderDrivenValidationTest, OverrideDisablesValidationMandatedByProvider) {
+// The override only skips verification, so hashes are still emitted and accumulated even when the
+// provider mandates validation.
+TEST_F(ProviderDrivenValidationTest, OverrideKeepsHashEmissionMandatedByProvider) {
     unittest::ServerParameterGuard disableValidation("disableContinuousInternodeValidation", true);
 
-    EXPECT_FALSE(isContinuousInternodeValidationPerDocumentEnabled(_opCtx.get()));
-    EXPECT_FALSE(isContinuousInternodeValidationPerCollectionEnabled(_opCtx.get()));
-}
-
-// The override is settable at runtime, and takes effect on the next operation to consult it in
-// either direction.
-TEST_F(ProviderDrivenValidationTest, OverrideTakesEffectAtRuntime) {
-    // Restores whatever the override held on the way out, including the store() calls below.
-    unittest::ServerParameterGuard restoreOverride("disableContinuousInternodeValidation", false);
-
-    ASSERT_TRUE(isContinuousInternodeValidationPerDocumentEnabled(_opCtx.get()));
-
-    disableContinuousInternodeValidation.store(true);
-    EXPECT_FALSE(isContinuousInternodeValidationPerDocumentEnabled(_opCtx.get()));
-    EXPECT_FALSE(isContinuousInternodeValidationPerCollectionEnabled(_opCtx.get()));
-
-    disableContinuousInternodeValidation.store(false);
     EXPECT_TRUE(isContinuousInternodeValidationPerDocumentEnabled(_opCtx.get()));
     EXPECT_TRUE(isContinuousInternodeValidationPerCollectionEnabled(_opCtx.get()));
 }
@@ -643,6 +626,22 @@ TEST_F(VerifyValidationHashTest, OverrideSkipsVerificationOfMismatchedHash) {
     EXPECT_EQ(logs.countBSONContainingSubset(BSON("id" << kMismatchLogId)), 0);
 }
 
+// The runtime override takes effect the next time verification eligibility is evaluated.
+TEST_F(VerifyValidationHashTest, OverrideTakesEffectAtRuntime) {
+    // Restores whatever the override held on the way out, including the store() calls below.
+    unittest::ServerParameterGuard restoreOverride("disableContinuousInternodeValidation", false);
+
+    ASSERT_TRUE(shouldVerify(_opCtx.get(), _nss, OplogApplication::Mode::kSecondary, int64_t{123}));
+
+    disableContinuousInternodeValidation.store(true);
+    EXPECT_FALSE(
+        shouldVerify(_opCtx.get(), _nss, OplogApplication::Mode::kSecondary, int64_t{123}));
+    EXPECT_TRUE(isContinuousInternodeValidationPerDocumentEnabled(_opCtx.get()));
+
+    disableContinuousInternodeValidation.store(false);
+    EXPECT_TRUE(shouldVerify(_opCtx.get(), _nss, OplogApplication::Mode::kSecondary, int64_t{123}));
+}
+
 // Validation hashes travel on the oplog and are checked as it is applied, so they are meaningless
 // outside a replica set.
 TEST_F(VerifyValidationHashTest, DisabledWhenNotAReplicaSet) {
@@ -655,6 +654,60 @@ TEST_F(VerifyValidationHashTest, DisabledWhenNotAReplicaSet) {
 
     EXPECT_FALSE(isContinuousInternodeValidationPerDocumentEnabled(_opCtx.get()));
     EXPECT_FALSE(isContinuousInternodeValidationPerCollectionEnabled(_opCtx.get()));
+}
+
+bool isCollectionHashEligibleFor(OperationContext* opCtx, const NamespaceString& nss) {
+    auto coll = acquireCollection(
+        opCtx,
+        CollectionAcquisitionRequest::fromOpCtx(opCtx, nss, AcquisitionPrerequisites::kRead),
+        MODE_IS);
+    return isCollectionHashEligible(coll.getCollectionPtr());
+}
+
+TEST_F(VerifyValidationHashTest, EligibleWithReplicatedRecordIds) {
+    EXPECT_TRUE(isCollectionHashEligibleFor(_opCtx.get(), _nss));
+}
+
+// A collection clustered on _id derives its record ids from its documents.
+TEST_F(VerifyValidationHashTest, EligibleWhenClusteredOnId) {
+    EXPECT_TRUE(isCollectionHashEligibleFor(_opCtx.get(), _clusteredNss));
+    EXPECT_TRUE(isCollectionHashEligibleFor(_opCtx.get(), _timeseriesNss));
+}
+
+TEST_F(VerifyValidationHashTest, IneligibleWithoutReplicatedRecordIds) {
+    EXPECT_FALSE(isCollectionHashEligibleFor(_opCtx.get(), _plainNss));
+}
+
+// The oplog is tracked by the replicated fast count under this flag, but its record ids are not
+// replicated.
+TEST_F(VerifyValidationHashTest, IneligibleForTheOplog) {
+    unittest::ServerParameterGuard trackOplog("featureFlagSizeBasedOplogTruncationForDisagg", true);
+    ASSERT_TRUE(isReplicatedFastCountEligible(NamespaceString::kRsOplogNamespace));
+    EXPECT_FALSE(isCollectionHashEligibleFor(_opCtx.get(), NamespaceString::kRsOplogNamespace));
+}
+
+TEST_F(VerifyValidationHashTest, IneligibleForPreImages) {
+    CollectionOptions options;
+    options.clusteredIndex = clustered_util::makeCanonicalClusteredInfoForLegacyFormat();
+    createCollection(_opCtx.get(), NamespaceString::kChangeStreamPreImagesNamespace, options);
+    EXPECT_FALSE(isCollectionHashEligibleFor(_opCtx.get(),
+                                             NamespaceString::kChangeStreamPreImagesNamespace));
+}
+
+TEST_F(VerifyValidationHashTest, IneligibleForUnreplicatedCollections) {
+    const auto localNss = NamespaceString::createNamespaceString_forTest("local.clustered");
+    CollectionOptions options;
+    options.clusteredIndex = clustered_util::makeDefaultClusteredIdIndex();
+    createCollection(_opCtx.get(), localNss, options);
+    EXPECT_FALSE(isCollectionHashEligibleFor(_opCtx.get(), localNss));
+}
+
+TEST_F(VerifyValidationHashTest, IneligibleForImplicitlyReplicatedCollections) {
+    CollectionOptions options;
+    options.clusteredIndex = clustered_util::makeDefaultClusteredIdIndex();
+    createCollection(_opCtx.get(), NamespaceString::kConfigImagesNamespace, options);
+    EXPECT_FALSE(
+        isCollectionHashEligibleFor(_opCtx.get(), NamespaceString::kConfigImagesNamespace));
 }
 
 template <typename Base>
@@ -1762,8 +1815,8 @@ protected:
         _workerPool = makeReplWorkerPool();
         _lsid = makeLogicalSessionId(_opCtx.get());
         _oplogApplier = std::make_unique<OplogApplierImpl>(
-            nullptr /* executor */,
-            nullptr /* oplogBuffer */,
+            /*executor=*/nullptr,
+            /*oplogBuffer=*/nullptr,
             &noopOplogApplierObserver,
             ReplicationCoordinator::get(_opCtx.get()),
             getConsistencyMarkers(),
@@ -2132,7 +2185,7 @@ protected:
                                                                Date_t::now(),
                                                                {StmtId(0)},
                                                                OpTime(),
-                                                               boost::none /* multiOpType */,
+                                                               /*multiOpType=*/boost::none,
                                                                ApplyOpsType::kPrepare);
         const OplogEntry commitEntry = makeCommandOplogEntryWithSessionInfoAndStmtIds(
             nextOpTime(),

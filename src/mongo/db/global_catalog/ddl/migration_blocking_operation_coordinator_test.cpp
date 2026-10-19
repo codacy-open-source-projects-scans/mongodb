@@ -6,11 +6,14 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/global_catalog/ddl/migration_blocking_operation_coordinator_gen.h"
 #include "mongo/db/global_catalog/ddl/sharding_coordinator_external_state_for_test.h"
+#include "mongo/db/global_catalog/ddl/sharding_coordinator_test_grid.h"
 #include "mongo/db/repl/primary_only_service_test_fixture.h"
 #include "mongo/db/shard_role/shard_catalog/catalog_raii.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/death_test.h"
 #include "mongo/unittest/server_parameter_guard.h"
+
+#include <optional>
 
 #define MONGO_LOGV2_DEFAULT_COMPONENT ::mongo::logv2::LogComponent::kTest
 
@@ -71,6 +74,8 @@ protected:
 
         _opCtxHolder = makeOperationContext();
         _opCtx = _opCtxHolder.get();
+        // The coordinator checks for in-progress index builds via Grid as soon as it starts.
+        _grid.emplace(_opCtx);
         auto stateDocument = createStateDocument();
         _instance = checked_pointer_cast<MigrationBlockingOperationCoordinator>(
             Instance::getOrCreate(_opCtx, _service, stateDocument.toBSON()));
@@ -198,6 +203,7 @@ protected:
     std::shared_ptr<MigrationBlockingOperationCoordinator> _instance;
     ServiceContext::UniqueOperationContext _opCtxHolder;
     OperationContext* _opCtx;
+    std::optional<ShardingCoordinatorTestGrid> _grid;
     std::vector<UUID> _operations;
     std::unique_ptr<ShardingCoordinatorExternalStateFactoryForTest> _externalStateFactory;
     std::shared_ptr<ShardingCoordinatorExternalStateForTest> _externalState;
@@ -279,6 +285,44 @@ DEATH_TEST_F(MigrationBlockingOperationCoordinatorTestDeathTest,
     stepUp(_opCtx);
 
     Instance::getOrCreate(_opCtx, _service, stateDocument.toBSON());
+}
+
+// Intentionally corrupts the persisted state document into a state that cannot arise through
+// ordinary operation of the coordinator: phase kBlockingMigrations with the "operations" array
+// removed entirely. Such a document still parses cleanly, so it survives recovery on failover.
+// This is a regression test verifying that we do not write to uninitialized memory when a
+// subsequent operation begins.
+TEST_F(MigrationBlockingOperationCoordinatorTest, BlockingMigrationsPhaseWithMissingOperations) {
+    _operations = {UUID::gen()};
+    beginOperations();
+    ASSERT_EQ(MigrationBlockingOperationCoordinatorPhaseEnum::kBlockingMigrations,
+              getStateDocumentOnDisk().getPhase());
+
+    // Drop the operations array from the on-disk document, leaving the phase untouched.
+    {
+        DBDirectClient client(_opCtx);
+        client.update(NamespaceString::kShardingDDLCoordinatorsNamespace,
+                      BSON("_id" << getCoordinatorId().toBSON()),
+                      BSON("$unset" << BSON("operations" << 1)));
+    }
+    ASSERT_FALSE(getStateDocumentOnDisk().getOperations());
+
+    stepDown();
+    ASSERT_NOT_OK(_instance->getCompletionFuture().getNoThrow());
+    stepUp(_opCtx);
+
+    // The lost operations are ignored; tracking restarts from the newly begun operation, which
+    // can then end normally and unblock migrations.
+    _instance = getExistingInstance();
+    _operations = {UUID::gen()};
+    ASSERT_DOES_NOT_THROW(beginOperations());
+    assertOperationCountOnDisk(1);
+    ASSERT_FALSE(_externalState->migrationsAreAllowed());
+
+    ASSERT_DOES_NOT_THROW(endOperations());
+    ASSERT_OK(_instance->getCompletionFuture().getNoThrow());
+    ASSERT_FALSE(stateDocumentExistsOnDisk());
+    ASSERT_TRUE(_externalState->migrationsAreAllowed());
 }
 
 TEST_F(MigrationBlockingOperationCoordinatorTest, BeginOperationThrowsWhileCoordinatorCleaningUp) {
